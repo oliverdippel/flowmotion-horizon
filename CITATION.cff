@@ -1,0 +1,9 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite it as below."
+title: "flowmotion-horizon: Conditional Flow Matching on AMASS with a Horizon-Stability Evaluation Harness"
+authors:
+  - family-names: "Dippel"
+    given-names: "Oliver"
+date-released: "2026-08-26"
+url: "https://github.com/oliverdippel/flowmotion-horizon"
+license: MIT

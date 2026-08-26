@@ -19,9 +19,11 @@ from flowmotion.data.loader import (
 from flowmotion.data.synthetic import generate_synthetic_amass
 from flowmotion.data.transforms import features_from_numpy
 from flowmotion.eval.harness import EvalConfig, run_horizon_eval
+from flowmotion.eval.metrics import sequence_features_to_joint_positions
 from flowmotion.eval.report import plot_horizon_curves, write_csv, write_json_summary
-from flowmotion.rollout import free_rollout
+from flowmotion.rollout import free_rollout, teacher_forced_rollout
 from flowmotion.train import TrainConfig, load_checkpoint, train
+from flowmotion.viz import render_skeleton_comparison_gif
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -66,6 +68,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p_demo = sub.add_parser("demo", help="fixture -> tiny train -> eval, end to end")
     p_demo.add_argument("--out", default="./runs/demo")
     p_demo.add_argument("--seed", type=int, default=0)
+
+    p_viz = sub.add_parser(
+        "visualize", help="render a free-vs-teacher-forced rollout comparison as a GIF"
+    )
+    p_viz.add_argument("--checkpoint", required=True)
+    p_viz.add_argument("--data-root", default=None)
+    p_viz.add_argument("--subject", required=True, help="subject_key, e.g. Dataset0/subject01")
+    p_viz.add_argument("--length", type=int, default=90)
+    p_viz.add_argument("--out", required=True)
+    p_viz.add_argument("--ode-steps", type=int, default=DEFAULT_ODE_STEPS)
+    p_viz.add_argument("--seed", type=int, default=0)
 
     return parser
 
@@ -196,12 +209,73 @@ def cmd_demo(args: argparse.Namespace) -> None:
     _run_eval_and_report(ckpt, held_out_sequences, eval_cfg, out_dir / "eval_report")
 
 
+def cmd_visualize(args: argparse.Namespace) -> None:
+    ckpt = load_checkpoint(args.checkpoint)
+    model, normalizer = ckpt["model"], ckpt["normalizer"]
+
+    data_root = resolve_data_root(args.data_root)
+    sequences = discover_sequences(data_root)
+    matches = [s for s in sequences if s.subject_key == args.subject]
+    if not matches:
+        raise ValueError(f"no sequences found for subject_key={args.subject!r}")
+    meta = matches[0]
+
+    raw = resample_to_fps(load_sequence(meta), target_fps=TARGET_FPS)
+    feat = features_from_numpy(raw.poses, raw.trans)
+    K, H = model.K, model.H
+    if feat.shape[0] < K + args.length:
+        raise ValueError(
+            f"sequence {meta.path} has only {feat.shape[0]} frames, "
+            f"need >= {K + args.length} for a length-{args.length} rollout"
+        )
+    seed_past = feat[:K]
+
+    subject_id = lookup_id(meta.subject_key, ckpt["subject_vocab"])
+    action_id = lookup_id(meta.dataset_name, ckpt["action_vocab"])
+
+    free = free_rollout(
+        model,
+        normalizer,
+        seed_past,
+        subject_id,
+        action_id,
+        total_frames=args.length,
+        H=H,
+        steps=args.ode_steps,
+        generator=torch.Generator().manual_seed(args.seed),
+    )
+    teacher_forced = teacher_forced_rollout(
+        model,
+        normalizer,
+        feat,
+        0,
+        subject_id,
+        action_id,
+        total_frames=args.length,
+        K=K,
+        H=H,
+        steps=args.ode_steps,
+        generator=torch.Generator().manual_seed(args.seed),
+    )
+
+    free_jp = sequence_features_to_joint_positions(free)
+    tf_jp = sequence_features_to_joint_positions(teacher_forced)
+
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    render_skeleton_comparison_gif(
+        free_jp, tf_jp, labels=("free rollout", "teacher-forced"), fps=TARGET_FPS, out_path=out_path
+    )
+    print(f"wrote visualization ({min(free_jp.shape[0], tf_jp.shape[0])} frames) to {out_path}")
+
+
 _COMMANDS = {
     "prepare-fixture": cmd_prepare_fixture,
     "train": cmd_train,
     "rollout": cmd_rollout,
     "eval": cmd_eval,
     "demo": cmd_demo,
+    "visualize": cmd_visualize,
 }
 
 

@@ -5,12 +5,22 @@ description = "Conditional flow matching on AMASS with a horizon-stability evalu
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
+keywords = ["flow-matching", "motion-generation", "amass", "evaluation", "pytorch"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "torch>=2.2",
     "numpy>=1.26",
     "pandas>=2.2",
     "matplotlib>=3.8",
 ]
+
+[project.urls]
+Repository = "https://github.com/oliverdippel/flowmotion-horizon"
 
 [project.scripts]
 flowmotion = "flowmotion.cli:main"
@@ -19,6 +29,8 @@ flowmotion = "flowmotion.cli:main"
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
+    "mypy>=1.11",
+    "pre-commit>=3.8",
 ]
 
 [build-system]
@@ -40,3 +52,9 @@ select = ["E", "F", "I", "UP"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.mypy]
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+check_untyped_defs = true

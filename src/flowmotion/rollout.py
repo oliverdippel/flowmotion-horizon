@@ -29,19 +29,24 @@ def integrate_velocity(
     x0: torch.Tensor | None = None,
     generator: torch.Generator | None = None,
 ) -> torch.Tensor:
-    """Fixed-step Euler integration of dx/dt = v_theta(x, t, past, labels) from t=0 to t=1."""
+    """Fixed-step Euler integration of dx/dt = v_theta(x, t, past, labels) from t=0 to t=1.
+
+    Runs under torch.no_grad() -- sampling is pure inference and never needs gradients,
+    and eval/rollout call this many times (e.g. thousands of trials in the horizon-eval
+    harness), so building an autograd graph here is pure waste."""
     B = past.shape[0]
     device = past.device
-    x = (
-        x0
-        if x0 is not None
-        else torch.randn(B, H, D, device=device, dtype=past.dtype, generator=generator)
-    )
-    dt = 1.0 / steps
-    for i in range(steps):
-        t = torch.full((B,), i * dt, device=device, dtype=past.dtype)
-        v = model(x, t, past, subject_id, action_id, training=False)
-        x = x + v * dt
+    with torch.no_grad():
+        x = (
+            x0
+            if x0 is not None
+            else torch.randn(B, H, D, device=device, dtype=past.dtype, generator=generator)
+        )
+        dt = 1.0 / steps
+        for i in range(steps):
+            t = torch.full((B,), i * dt, device=device, dtype=past.dtype)
+            v = model(x, t, past, subject_id, action_id, training=False)
+            x = x + v * dt
     return x
 
 

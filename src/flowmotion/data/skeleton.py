@@ -110,15 +110,17 @@ def forward_kinematics(joint_rotmats: torch.Tensor, root_trans: torch.Tensor) ->
     offsets = _rest_offsets_tensor(joint_rotmats.dtype, joint_rotmats.device)
     lead_shape = joint_rotmats.shape[:-3]
 
-    global_rot = [None] * NUM_JOINTS
-    global_pos = [None] * NUM_JOINTS
+    global_rot: list[torch.Tensor | None] = [None] * NUM_JOINTS
+    global_pos: list[torch.Tensor | None] = [None] * NUM_JOINTS
     global_rot[0] = joint_rotmats[..., 0, :, :]
     global_pos[0] = root_trans
 
     for j in range(1, NUM_JOINTS):
         p = JOINT_PARENTS[j]
+        parent_rot, parent_pos = global_rot[p], global_pos[p]
+        assert parent_rot is not None and parent_pos is not None  # p < j, already computed
         offset = offsets[j].expand(*lead_shape, 3)
-        global_rot[j] = global_rot[p] @ joint_rotmats[..., j, :, :]
-        global_pos[j] = global_pos[p] + (global_rot[p] @ offset.unsqueeze(-1)).squeeze(-1)
+        global_rot[j] = parent_rot @ joint_rotmats[..., j, :, :]
+        global_pos[j] = parent_pos + (parent_rot @ offset.unsqueeze(-1)).squeeze(-1)
 
-    return torch.stack(global_pos, dim=-2)
+    return torch.stack([pos for pos in global_pos if pos is not None], dim=-2)

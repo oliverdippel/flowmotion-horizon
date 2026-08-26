@@ -5,6 +5,7 @@ Network feature layout (D = 135): 22 joints x 6D rotation (132) + root translati
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 import numpy as np
@@ -58,16 +59,16 @@ class Normalizer:
         return cls(mean=mean, std=std)
 
     @classmethod
-    def fit_streaming(cls, windows, eps: float = 1e-6) -> Normalizer:
+    def fit_streaming(cls, windows: Iterable[torch.Tensor], eps: float = 1e-6) -> Normalizer:
         """Same statistics as `fit`, but consumes an iterable of (T, D) tensors one at a
         time (e.g. `MotionWindowDataset.iter_recentered_windows()`) via running sum/sum-
         of-squares, so the whole corpus is never materialized as one in-memory tensor."""
         count = 0
-        sum_ = None
-        sumsq = None
+        sum_: torch.Tensor | None = None
+        sumsq: torch.Tensor | None = None
         for window in windows:
             flat = window.reshape(-1, window.shape[-1])
-            if sum_ is None:
+            if sum_ is None or sumsq is None:
                 sum_ = flat.sum(dim=0).clone()
                 sumsq = (flat**2).sum(dim=0).clone()
             else:
@@ -75,7 +76,7 @@ class Normalizer:
                 sumsq += (flat**2).sum(dim=0)
             count += flat.shape[0]
 
-        if count == 0:
+        if count == 0 or sum_ is None or sumsq is None:
             raise ValueError("fit_streaming received no windows to fit on")
 
         mean = sum_ / count
