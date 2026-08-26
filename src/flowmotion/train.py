@@ -39,6 +39,7 @@ class TrainConfig:
     held_out_frac: float = 0.15
     seed: int = 0
     log_every: int = field(default=50)
+    cache_size: int = 64
 
 
 def train(cfg: TrainConfig) -> Path:
@@ -56,7 +57,7 @@ def train(cfg: TrainConfig) -> Path:
     subject_vocab = build_vocab(train_subjects)
     action_vocab = build_vocab([s.dataset_name for s in sequences])
 
-    fit_dataset = MotionWindowDataset(
+    train_dataset = MotionWindowDataset(
         train_sequences,
         subject_vocab,
         action_vocab,
@@ -65,23 +66,18 @@ def train(cfg: TrainConfig) -> Path:
         cfg.stride,
         normalizer=None,
         target_fps=cfg.target_fps,
-    )
-    normalizer = Normalizer.fit(fit_dataset.all_train_features())
-
-    train_dataset = MotionWindowDataset(
-        train_sequences,
-        subject_vocab,
-        action_vocab,
-        cfg.K,
-        cfg.H,
-        cfg.stride,
-        normalizer=normalizer,
-        target_fps=cfg.target_fps,
+        cache_size=cfg.cache_size,
     )
     if len(train_dataset) == 0:
         raise ValueError(
             "Training dataset has zero windows -- check K/H/stride vs sequence lengths."
         )
+
+    # Streaming fit: one pass over every window's features via the same lazy/LRU-cached
+    # loader `__getitem__` uses, so fitting a real AMASS-scale corpus never requires
+    # holding the whole thing in memory at once.
+    normalizer = Normalizer.fit_streaming(train_dataset.iter_recentered_windows())
+    train_dataset.normalizer = normalizer
 
     batch_size = min(cfg.batch_size, len(train_dataset))
     loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=False)

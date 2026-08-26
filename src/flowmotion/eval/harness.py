@@ -17,6 +17,7 @@ from flowmotion.data.transforms import Normalizer, features_from_numpy
 from flowmotion.eval.metrics import (
     compute_reference_stats,
     distributional_drift,
+    estimate_foot_floor,
     foot_skate,
     mean_squared_jerk,
     rollout_divergence,
@@ -58,6 +59,7 @@ def run_horizon_eval(
     ref_stats = compute_reference_stats(
         real_joint_pos, fps=cfg.fps, trailing_window=cfg.trailing_window
     )
+    foot_floor = estimate_foot_floor(real_joint_pos)
 
     rows: list[dict] = []
     seed_counter = cfg.seed_base
@@ -121,7 +123,7 @@ def run_horizon_eval(
                 free_jp = sequence_features_to_joint_positions(free)
                 tf_jp = sequence_features_to_joint_positions(tf)
 
-                fs = foot_skate(free_jp, fps=cfg.fps)
+                fs = foot_skate(free_jp, fps=cfg.fps, floor=foot_floor)
                 jerk = mean_squared_jerk(free_jp, fps=cfg.fps)
                 drift = distributional_drift(
                     free_jp, fps=cfg.fps, ref_stats=ref_stats, trailing_window=cfg.trailing_window

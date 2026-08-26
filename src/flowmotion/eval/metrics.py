@@ -19,6 +19,31 @@ def sequence_features_to_joint_positions(feat: torch.Tensor) -> torch.Tensor:
     return forward_kinematics(rotmats, trans)
 
 
+def estimate_foot_floor(
+    reference_joint_pos: list[torch.Tensor],
+    up_axis_idx: int = UP_AXIS_IDX,
+    foot_idxs: tuple[int, int] = (LEFT_FOOT_IDX, RIGHT_FOOT_IDX),
+    percentile: float = 1.0,
+) -> dict:
+    """Per-foot floor height, estimated as a low percentile of that joint's height across
+    real reference sequences.
+
+    This codebase has no real SMPL body model (see skeleton.py), so there is no guarantee
+    that world-space height 0 corresponds to actual ground contact under the approximate
+    rig -- on real AMASS data it does not (verified: even ground-truth sequences never
+    bring a foot below ~0.5-0.6 under this rig's FK). Calibrating "floor" from real data's
+    own low-percentile height is a data-driven stand-in that doesn't require a real body
+    model, and `foot_skate` falls back to an absolute floor of 0 when `floor=None` (e.g.
+    for the synthetic fixture, where 0 genuinely is ground level by construction)."""
+    floor = {}
+    for name, idx in zip(("left", "right"), foot_idxs):
+        heights = torch.cat(
+            [jp[:, idx, up_axis_idx] for jp in reference_joint_pos if jp.shape[0] > 0]
+        )
+        floor[name] = float(torch.quantile(heights, percentile / 100.0).item())
+    return floor
+
+
 def foot_skate(
     joint_pos: torch.Tensor,
     fps: float,
@@ -26,11 +51,14 @@ def foot_skate(
     height_thresh: float = 0.05,
     vel_thresh: float = 0.15,
     foot_idxs: tuple[int, int] = (LEFT_FOOT_IDX, RIGHT_FOOT_IDX),
+    floor: dict | None = None,
 ) -> dict:
     """Mean horizontal displacement of a foot joint during frames classified as
-    ground-contact (low height + low vertical velocity). `contact_frame_count` is
-    surfaced separately: a foot that never touches the ground reports 0 skate, which
-    must not be read as "good" -- it means the model produced no evaluable contact."""
+    ground-contact (low height above `floor` + low vertical velocity). `floor` is a
+    per-foot world-space height from `estimate_foot_floor`; without one, height is
+    measured against an absolute floor of 0. `contact_frame_count` is surfaced
+    separately: a foot that never touches the ground reports 0 skate, which must not
+    be read as "good" -- it means the model produced no evaluable contact."""
     horiz_idxs = [i for i in range(3) if i != up_axis_idx]
     T = joint_pos.shape[0]
     per_foot = {}
@@ -40,13 +68,14 @@ def foot_skate(
     for name, idx in zip(("left", "right"), foot_idxs):
         pos = joint_pos[:, idx, :]
         height = pos[:, up_axis_idx]
+        floor_height = floor[name] if floor is not None else 0.0
         vel_up = torch.zeros(T, dtype=pos.dtype)
         vel_up[1:] = (height[1:] - height[:-1]) * fps
         disp = torch.zeros(T, dtype=pos.dtype)
         horiz = pos[:, horiz_idxs]
         disp[1:] = torch.linalg.norm(horiz[1:] - horiz[:-1], dim=-1)
 
-        contact = (height < height_thresh) & (vel_up.abs() < vel_thresh)
+        contact = (height < floor_height + height_thresh) & (vel_up.abs() < vel_thresh)
         contact[0] = False  # frame 0 has no valid velocity/displacement reference
 
         skate_vals = disp[contact]

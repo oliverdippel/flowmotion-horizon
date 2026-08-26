@@ -49,14 +49,22 @@ class RawSequence:
 
 
 def discover_sequences(root: str | Path) -> list[SequenceMeta]:
-    """Globs `<root>/*/*/*.npz` and reads just enough of each file to build metadata."""
+    """Globs `<root>/*/*/*.npz` and reads just enough of each file to build metadata.
+
+    Real AMASS subject directories can contain non-sequence .npz files alongside motion
+    sequences -- e.g. a per-subject `shape.npz` holding only `gender`/`betas`, no `poses`.
+    Those are skipped (not every .npz under a subject dir is a motion sequence)."""
     root = Path(root)
     metas: list[SequenceMeta] = []
+    skipped: list[Path] = []
     for path in sorted(root.glob("*/*/*.npz")):
         dataset_name = path.parent.parent.name
         subject_dir = path.parent.name
         subject_key = f"{dataset_name}/{subject_dir}"
         with np.load(path) as data:
+            if "poses" not in data or "mocap_framerate" not in data:
+                skipped.append(path)
+                continue
             num_frames = int(data["poses"].shape[0])
             framerate = float(data["mocap_framerate"])
         metas.append(
@@ -68,6 +76,8 @@ def discover_sequences(root: str | Path) -> list[SequenceMeta]:
                 framerate=framerate,
             )
         )
+    if skipped:
+        print(f"discover_sequences: skipped {len(skipped)} non-motion .npz file(s) under {root}")
     if not metas:
         raise FileNotFoundError(f"No sequences found under {root} (expected */*/*.npz)")
     return metas
