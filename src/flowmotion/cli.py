@@ -20,6 +20,7 @@ from flowmotion.data.synthetic import generate_synthetic_amass
 from flowmotion.data.transforms import features_from_numpy
 from flowmotion.eval.harness import EvalConfig, run_horizon_eval
 from flowmotion.eval.metrics import sequence_features_to_joint_positions
+from flowmotion.eval.parallel import run_horizon_eval_parallel
 from flowmotion.eval.report import plot_horizon_curves, write_csv, write_json_summary
 from flowmotion.rollout import free_rollout, teacher_forced_rollout
 from flowmotion.train import TrainConfig, load_checkpoint, train
@@ -64,6 +65,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_eval.add_argument("--out-dir", required=True)
     p_eval.add_argument("--seeds-per-subject", type=int, default=2)
     p_eval.add_argument("--ode-steps", type=int, default=DEFAULT_ODE_STEPS)
+    p_eval.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="shard held-out sequences across N worker processes (1 = run in-process)",
+    )
 
     p_demo = sub.add_parser("demo", help="fixture -> tiny train -> eval, end to end")
     p_demo.add_argument("--out", default="./runs/demo")
@@ -150,6 +157,15 @@ def cmd_rollout(args: argparse.Namespace) -> None:
     print(f"wrote rollout ({result.shape[0]} frames) to {out_path}")
 
 
+def _write_eval_report(df, out_dir: Path) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    write_csv(df, out_dir / "horizon_eval.csv")
+    write_json_summary(df, out_dir / "horizon_eval_summary.json")
+    plot_horizon_curves(df, out_dir / "horizon_curves.png")
+    n_skipped = int(df["skipped"].sum()) if len(df) else 0
+    print(f"wrote eval report to {out_dir} ({len(df) - n_skipped} evaluated, {n_skipped} skipped)")
+
+
 def _run_eval_and_report(
     ckpt: dict, held_out_sequences, eval_cfg: EvalConfig, out_dir: Path
 ) -> None:
@@ -161,25 +177,26 @@ def _run_eval_and_report(
         held_out_sequences,
         eval_cfg,
     )
-    out_dir.mkdir(parents=True, exist_ok=True)
-    write_csv(df, out_dir / "horizon_eval.csv")
-    write_json_summary(df, out_dir / "horizon_eval_summary.json")
-    plot_horizon_curves(df, out_dir / "horizon_curves.png")
-    n_skipped = int(df["skipped"].sum()) if len(df) else 0
-    print(f"wrote eval report to {out_dir} ({len(df) - n_skipped} evaluated, {n_skipped} skipped)")
+    _write_eval_report(df, out_dir)
 
 
 def cmd_eval(args: argparse.Namespace) -> None:
+    lengths = [int(x) for x in args.lengths.split(",")]
+    cfg = EvalConfig(
+        rollout_lengths=lengths, seeds_per_subject=args.seeds_per_subject, ode_steps=args.ode_steps
+    )
+
+    if args.workers > 1:
+        data_root = resolve_data_root(args.data_root)
+        df = run_horizon_eval_parallel(args.checkpoint, data_root, cfg, num_workers=args.workers)
+        _write_eval_report(df, Path(args.out_dir))
+        return
+
     ckpt = load_checkpoint(args.checkpoint)
     data_root = resolve_data_root(args.data_root)
     sequences = discover_sequences(data_root)
     held_out_keys = set(ckpt["held_out_subjects"])
     held_out_sequences = [s for s in sequences if s.subject_key in held_out_keys]
-
-    lengths = [int(x) for x in args.lengths.split(",")]
-    cfg = EvalConfig(
-        rollout_lengths=lengths, seeds_per_subject=args.seeds_per_subject, ode_steps=args.ode_steps
-    )
     _run_eval_and_report(ckpt, held_out_sequences, cfg, Path(args.out_dir))
 
 

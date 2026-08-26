@@ -1,10 +1,16 @@
 """Horizon-stability evaluation: runs matched free/teacher-forced rollouts from held-out-
 subject seed windows at increasing rollout lengths, and reports foot-skate, jerk,
 distributional-drift, and free-vs-teacher-forced divergence, grouped by held-out subject.
+
+`run_horizon_eval` runs every trial in-process. `eval.parallel.run_horizon_eval_parallel`
+shards held-out sequences across worker processes and reuses the same trial logic
+(`_run_trials`) and reference-statistics computation (`compute_reference_artifacts`)
+defined here, so the two paths can't silently diverge in behavior.
 """
 
 from __future__ import annotations
 
+import zlib
 from dataclasses import dataclass, field
 
 import pandas as pd
@@ -25,6 +31,8 @@ from flowmotion.eval.metrics import (
 )
 from flowmotion.rollout import free_rollout, teacher_forced_rollout
 
+LoadedSequence = tuple[SequenceMeta, torch.Tensor]
+
 
 @dataclass
 class EvalConfig:
@@ -36,33 +44,53 @@ class EvalConfig:
     seed_base: int = 0
 
 
-def run_horizon_eval(
+def _trial_seed(seed_base: int, subject_key: str, seq_name: str, seed_idx: int, length: int) -> int:
+    """Deterministic per-trial RNG seed derived from what identifies the trial, not from
+    iteration order -- so sharding the same trials across parallel workers (in any order,
+    any partition) reproduces exactly the same seeds a serial run would use."""
+    key = f"{seed_base}:{subject_key}:{seq_name}:{seed_idx}:{length}"
+    return zlib.crc32(key.encode("utf-8"))
+
+
+def load_sequences(sequences: list[SequenceMeta], fps: float) -> list[LoadedSequence]:
+    """Loads and resamples each sequence to `fps`, returning absolute (unrecentered,
+    unnormalized) feature tensors alongside their metadata."""
+    loaded = []
+    for meta in sequences:
+        raw = resample_to_fps(load_sequence(meta), target_fps=fps)
+        feat = features_from_numpy(raw.poses, raw.trans)
+        loaded.append((meta, feat))
+    return loaded
+
+
+def compute_reference_artifacts(
+    loaded: list[LoadedSequence], fps: float, trailing_window: int
+) -> tuple[dict, dict]:
+    """Reference statistics and foot-floor calibration computed once from real held-out
+    data, shared by every trial (and, in the parallel path, by every worker) so held-out
+    subjects are always compared against the same real-data reference regardless of how
+    work is partitioned."""
+    real_joint_pos = [sequence_features_to_joint_positions(feat) for _, feat in loaded]
+    ref_stats = compute_reference_stats(real_joint_pos, fps=fps, trailing_window=trailing_window)
+    foot_floor = estimate_foot_floor(real_joint_pos)
+    return ref_stats, foot_floor
+
+
+def _run_trials(
     model,
     normalizer: Normalizer,
     subject_vocab: dict[str, int],
     action_vocab: dict[str, int],
-    held_out_sequences: list[SequenceMeta],
+    loaded: list[LoadedSequence],
     cfg: EvalConfig,
-) -> pd.DataFrame:
+    ref_stats: dict,
+    foot_floor: dict,
+) -> list[dict]:
+    """The core per-(subject, seed, length) trial loop, independent of how `loaded` was
+    assembled -- the full held-out set (serial path) or one shard of it (parallel path)."""
     model.eval()
     K, H = model.K, model.H
-
-    # Load every held-out sequence's absolute features once; also used to build the
-    # real-data reference statistics that distributional_drift measures against.
-    loaded: list[tuple[SequenceMeta, torch.Tensor]] = []
-    for meta in held_out_sequences:
-        raw = resample_to_fps(load_sequence(meta), target_fps=cfg.fps)
-        feat = features_from_numpy(raw.poses, raw.trans)
-        loaded.append((meta, feat))
-
-    real_joint_pos = [sequence_features_to_joint_positions(feat) for _, feat in loaded]
-    ref_stats = compute_reference_stats(
-        real_joint_pos, fps=cfg.fps, trailing_window=cfg.trailing_window
-    )
-    foot_floor = estimate_foot_floor(real_joint_pos)
-
     rows: list[dict] = []
-    seed_counter = cfg.seed_base
 
     for meta, feat in loaded:
         T = feat.shape[0]
@@ -78,7 +106,6 @@ def run_horizon_eval(
             seed_past_abs = feat[start : start + K]
 
             for length in cfg.rollout_lengths:
-                seed_counter += 1
                 needed = start + K + length
                 if needed > T:
                     rows.append(
@@ -92,8 +119,11 @@ def run_horizon_eval(
                     )
                     continue
 
-                gen_free = torch.Generator().manual_seed(seed_counter)
-                gen_tf = torch.Generator().manual_seed(seed_counter)
+                trial_seed = _trial_seed(
+                    cfg.seed_base, meta.subject_key, meta.path.stem, seed_idx, length
+                )
+                gen_free = torch.Generator().manual_seed(trial_seed)
+                gen_tf = torch.Generator().manual_seed(trial_seed)
 
                 free = free_rollout(
                     model,
@@ -151,6 +181,22 @@ def run_horizon_eval(
                     }
                 )
 
+    return rows
+
+
+def run_horizon_eval(
+    model,
+    normalizer: Normalizer,
+    subject_vocab: dict[str, int],
+    action_vocab: dict[str, int],
+    held_out_sequences: list[SequenceMeta],
+    cfg: EvalConfig,
+) -> pd.DataFrame:
+    loaded = load_sequences(held_out_sequences, cfg.fps)
+    ref_stats, foot_floor = compute_reference_artifacts(loaded, cfg.fps, cfg.trailing_window)
+    rows = _run_trials(
+        model, normalizer, subject_vocab, action_vocab, loaded, cfg, ref_stats, foot_floor
+    )
     return pd.DataFrame(rows)
 
 
