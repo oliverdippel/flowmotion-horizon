@@ -48,6 +48,18 @@ def _build_parser() -> argparse.ArgumentParser:
     p_train.add_argument("--n-layers", type=int, default=4)
     p_train.add_argument("--n-heads", type=int, default=4)
     p_train.add_argument("--cache-size", type=int, default=64)
+    p_train.add_argument(
+        "--val-every",
+        type=int,
+        default=0,
+        help="compute held-out-subject validation loss every N steps (0 = disabled)",
+    )
+    p_train.add_argument("--val-batches", type=int, default=20)
+    p_train.add_argument(
+        "--yaw-align",
+        action="store_true",
+        help="canonicalize each window's heading about the up axis before training",
+    )
 
     p_rollout = sub.add_parser("rollout", help="free-rollout from a trained checkpoint")
     p_rollout.add_argument("--checkpoint", required=True)
@@ -64,6 +76,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_eval.add_argument("--lengths", default="30,60,90,150,300")
     p_eval.add_argument("--out-dir", required=True)
     p_eval.add_argument("--seeds-per-subject", type=int, default=2)
+    p_eval.add_argument(
+        "--noise-samples",
+        type=int,
+        default=1,
+        help="independent noise draws per trial, averaged over (default 1 = single draw)",
+    )
     p_eval.add_argument("--ode-steps", type=int, default=DEFAULT_ODE_STEPS)
     p_eval.add_argument(
         "--workers",
@@ -113,6 +131,9 @@ def cmd_train(args: argparse.Namespace) -> None:
         n_layers=args.n_layers,
         n_heads=args.n_heads,
         cache_size=args.cache_size,
+        val_every=args.val_every,
+        val_batches=args.val_batches,
+        yaw_align=args.yaw_align,
     )
     train(cfg)
 
@@ -149,6 +170,7 @@ def cmd_rollout(args: argparse.Namespace) -> None:
         H=model.H,
         steps=args.ode_steps,
         generator=generator,
+        yaw_align=ckpt["cfg"].get("yaw_align", False),
     )
 
     out_path = Path(args.out)
@@ -183,7 +205,10 @@ def _run_eval_and_report(
 def cmd_eval(args: argparse.Namespace) -> None:
     lengths = [int(x) for x in args.lengths.split(",")]
     cfg = EvalConfig(
-        rollout_lengths=lengths, seeds_per_subject=args.seeds_per_subject, ode_steps=args.ode_steps
+        rollout_lengths=lengths,
+        seeds_per_subject=args.seeds_per_subject,
+        noise_samples=args.noise_samples,
+        ode_steps=args.ode_steps,
     )
 
     if args.workers > 1:
@@ -193,6 +218,7 @@ def cmd_eval(args: argparse.Namespace) -> None:
         return
 
     ckpt = load_checkpoint(args.checkpoint)
+    cfg.yaw_align = ckpt["cfg"].get("yaw_align", False)
     data_root = resolve_data_root(args.data_root)
     sequences = discover_sequences(data_root)
     held_out_keys = set(ckpt["held_out_subjects"])
@@ -249,6 +275,7 @@ def cmd_visualize(args: argparse.Namespace) -> None:
 
     subject_id = lookup_id(meta.subject_key, ckpt["subject_vocab"])
     action_id = lookup_id(meta.dataset_name, ckpt["action_vocab"])
+    yaw_align = ckpt["cfg"].get("yaw_align", False)
 
     free = free_rollout(
         model,
@@ -260,6 +287,7 @@ def cmd_visualize(args: argparse.Namespace) -> None:
         H=H,
         steps=args.ode_steps,
         generator=torch.Generator().manual_seed(args.seed),
+        yaw_align=yaw_align,
     )
     teacher_forced = teacher_forced_rollout(
         model,
@@ -273,6 +301,7 @@ def cmd_visualize(args: argparse.Namespace) -> None:
         H=H,
         steps=args.ode_steps,
         generator=torch.Generator().manual_seed(args.seed),
+        yaw_align=yaw_align,
     )
 
     free_jp = sequence_features_to_joint_positions(free)

@@ -3,9 +3,9 @@
 NOTE (open design call, see README limitations): there is no real SMPL body model here
 (betas-conditioned shape is license-gated separately from AMASS mocap data). REST_OFFSETS
 below is a hardcoded, approximate adult T-pose bone-offset template, not derived from a real
-SMPL shape space. JOINT_PARENTS follows the standard published SMPL kinematic tree (root +
-21 body joints, hands dropped) but should be cross-checked against a canonical SMPL joint
-table before this code is trusted for anything beyond relative-degradation metrics.
+SMPL shape space -- absolute joint positions are approximate. JOINT_PARENTS matches the
+canonical published SMPL kinematic tree (root + 21 body joints, hands dropped) exactly;
+`tests/test_skeleton_fk.py` pins it against that reference array as a regression check.
 
 Joint order (index: name, parent):
  0 pelvis (root)       parent -1

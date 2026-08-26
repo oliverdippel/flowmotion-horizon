@@ -94,10 +94,12 @@ src/flowmotion/
   viz.py            renders a free-vs-teacher-forced comparison as a GIF
   train.py          training loop, checkpointing, and distributed (DDP) support
   cli.py            `flowmotion` command-line entry point
-tests/              47 tests: rotation-matrix round-trips, forward-kinematics
-                    correctness, subject-split leakage, each metric against a
-                    hand-constructed sequence with a known answer, rollout shapes,
-                    parallel-vs-serial eval agreement, and an end-to-end smoke test
+tests/              60 tests: rotation-matrix round-trips, forward-kinematics
+                    correctness against the canonical SMPL kinematic tree,
+                    subject-split leakage, each metric against a hand-constructed
+                    sequence with a known answer, rollout shapes, yaw-alignment
+                    rotation invariance, parallel-vs-serial eval agreement,
+                    validation-loss tracking, and an end-to-end smoke test
 scripts/            standalone analysis scripts, not part of the installed package
 assets/             example outputs referenced under Results
 ```
@@ -151,10 +153,11 @@ and running the same trial logic as the single-process path (`eval/harness.py`'s
 `_run_trials`). Per-trial RNG seeds are derived from trial identity — subject,
 sequence, seed index, rollout length — via `zlib.crc32`, not from iteration order, so
 results don't depend on how trials are partitioned; `tests/test_eval_parallel.py`
-checks the parallel and serial paths agree exactly. Measured on the 3,121-trial, 20
-subject evaluation above: 14:07 at `--workers 1` vs. 7:20 at `--workers 8` (11-core
-CPU) — a real but sub-linear speedup, since reference-statistic computation happens
-once up front (not parallelized) and sequences are partitioned round-robin without
+checks the parallel and serial paths agree exactly. Measured on a 3,121-trial,
+20-subject evaluation (single noise draw per trial) on the checkpoint described
+under Results: 14:07 at `--workers 1` vs. 7:20 at `--workers 8` (11-core CPU) — a
+real but sub-linear speedup, since reference-statistic computation happens once up
+front (not parallelized) and sequences are partitioned round-robin without
 accounting for how many trials each one contributes.
 
 **Distributed training.** `train()` checks for `WORLD_SIZE`/`RANK`/`LOCAL_RANK` (the
@@ -201,7 +204,10 @@ The parameters worth knowing about:
 | `cache_size` | 64 | resident sequences in the dataset's LRU cache; raise above your total sequence count for a real corpus (the run below used 3500) |
 | `rollout_lengths` | `[30, 60, 90, 150, 300]` | evaluated per held-out subject; a length longer than a given sequence is skipped and recorded, not silently dropped |
 | `seeds_per_subject` | 2 | non-overlapping seed windows per sequence |
+| `noise_samples` | 1 | independent noise draws averaged per trial |
 | `ode_steps` | 10 | Euler steps at sampling time |
+| `val_every` | 0 | steps between held-out-subject validation-loss checks; 0 disables it |
+| `yaw_align` | `False` | canonicalize heading about the up axis (see Limitations) |
 
 ## Implementation notes
 
@@ -238,18 +244,24 @@ SFU, TotalCapture — 3,026 sequences, 135 subjects, 115 train / 20 held out):
 uv run flowmotion train --data-root /path/to/amass --out ./runs/real_v2 \
     --steps 20000 --batch-size 64 --cache-size 3500 --d-model 384 --n-layers 6 --n-heads 6
 uv run flowmotion eval --checkpoint ./runs/real_v2/model.pt --data-root /path/to/amass \
-    --lengths 30,60,90,150,300 --seeds-per-subject 3 --out-dir ./runs/real_v2/eval_report
+    --lengths 30,60,90,150,300 --seeds-per-subject 3 --noise-samples 3 --workers 8 \
+    --out-dir ./runs/real_v2/eval_report
 ```
 
-~42 minutes to train on CPU. Training loss: 2.24 → ~0.28.
+~42 minutes to train on CPU. Training loss: 2.24 → ~0.28. Eval ran in 22 minutes across
+8 worker processes (9,363 trials: 3 seed windows × 3 noise draws per trial, averaged).
 
 ![Horizon-stability metrics](assets/horizon_curves_example.png)
 
-Evaluated on all 20 held-out subjects (3,121 trials): free-vs-teacher-forced
-divergence grows with rollout length — 1.02 → 2.56 → 4.39 → 5.95 → 11.05 across
-lengths 30/60/90/150/300 — the behavior the harness is built to detect. Foot-skate and
-jerk have wide variance at this scale: the held-out pool is small relative to how
-rarely a foot is classified as in ground contact.
+Free-vs-teacher-forced divergence grows with rollout length — 1.04 → 2.56 → 4.26 →
+5.98 → 10.98 across lengths 30/60/90/150/300 — the behavior the harness is built to
+detect. 95% bootstrap confidence intervals (resampled over held-out subjects, in
+`horizon_eval_summary.json`) are [0.99, 1.32] at length 30, widening to [9.44, 19.82]
+at length 300 — partly real uncertainty, partly that only 7 of the 20 held-out
+subjects have a sequence long enough to evaluate at length 300 (recorded, not
+silently dropped — see `skipped` in the CSV). Foot-skate and jerk stay noisy at this
+scale: contact events are rare enough under this rig that most lengths average out
+to ~0.
 
 ![Free rollout vs. teacher-forced rollout](assets/rollout_comparison_example.gif)
 
@@ -275,21 +287,28 @@ about the metric.
 ## Limitations
 
 - **No real SMPL body model.** `betas`-conditioned shape is license-gated separately
-  from AMASS mocap data. `skeleton.py` uses a fixed, hand-specified bone-offset
-  template instead of a per-subject shape, so absolute joint positions are
-  approximate. The evaluation metrics are relative (degradation vs. rollout length, or
-  deviation from a calibrated reference), which is largely insensitive to this, but
-  the output should not be read as calibrated geometry.
-- **Joint parent topology** follows the standard SMPL kinematic tree but has not been
-  cross-checked against a canonical joint table with a real body model.
-- **Root canonicalization** is per-window x, y recentering, not full yaw alignment
-  (rotating each window to face a fixed direction, as in HuMoR/MDM-style pipelines).
-- **Single noise seed per divergence trial** — not averaged over multiple draws.
+  from AMASS mocap data (a second, independent license at smpl.is.tue.mpg.de — not
+  something this repository can resolve on its own). `skeleton.py` uses a fixed,
+  hand-specified bone-offset template instead of a per-subject shape, so absolute
+  joint positions are approximate. The evaluation metrics are relative (degradation
+  vs. rollout length, or deviation from a calibrated reference), which is largely
+  insensitive to this, but the output should not be read as calibrated geometry.
 - **Held-out set size.** 20 subjects is enough for the divergence-vs-length trend to
-  be visible but not for per-metric confidence intervals; foot-skate in particular has
-  few ground-contact frames at this scale.
-- 10-step Euler integration and the `p_label_dropout=0.1` / `held_out_frac=0.15`
-  defaults are standard choices, not tuned against a validation objective.
+  be visible, and the bootstrap confidence intervals in the Results section are
+  computed honestly on that basis — which is exactly why they widen sharply at
+  length 300, where only 7 of the 20 subjects have long enough sequences to evaluate.
+  Foot-skate in particular has few ground-contact frames at this scale, wide interval
+  or not.
+- **Yaw alignment is implemented but off by default.** `--yaw-align` canonicalizes
+  each window's heading about the up axis (`transforms.yaw_align_window`, verified
+  by a rotation-invariance test: two windows with identical local motion but
+  different global heading become identical after alignment). It's opt-in because
+  enabling it changes what the model is trained on — the checkpoint used for the
+  results above was trained without it, and turning it on requires retraining, not
+  just re-evaluating.
+- 10-step Euler integration is a standard choice, not tuned against a validation
+  objective — though one is now available: `--val-every N` tracks flow-matching loss
+  on held-out-subject windows during training, which the checkpoint above did not use.
 
 ## Citation
 

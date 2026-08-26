@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import torch
 
-from flowmotion.data.transforms import Normalizer
+from flowmotion.data.transforms import FEATURE_DIM, Normalizer
 from flowmotion.model.network import VelocityTransformer
 from flowmotion.rollout import free_rollout, teacher_forced_rollout
 
-D, K, H = 8, 3, 3
+# D must be the real feature dimension: TRANS_START (used throughout rollout.py) is a
+# fixed offset into a FEATURE_DIM-wide vector, not something a smaller D can stand in
+# for. K/H are still shrunk for test speed.
+D, K, H = FEATURE_DIM, 3, 3
 
 
 def _tiny_model():
@@ -91,3 +94,37 @@ def test_teacher_forced_rollout_stops_early_when_real_data_runs_out():
     )
     assert out.shape[0] < 9
     assert out.shape[0] == H  # exactly one window's worth before running out
+
+
+def test_free_rollout_with_yaw_align_matches_shape_and_is_reproducible():
+    model = _tiny_model().eval()
+    normalizer = _identity_normalizer()
+    seed_past = torch.randn(K, D)
+    gen1 = torch.Generator().manual_seed(7)
+    gen2 = torch.Generator().manual_seed(7)
+    out1 = free_rollout(
+        model,
+        normalizer,
+        seed_past,
+        0,
+        0,
+        total_frames=6,
+        H=H,
+        steps=4,
+        generator=gen1,
+        yaw_align=True,
+    )
+    out2 = free_rollout(
+        model,
+        normalizer,
+        seed_past,
+        0,
+        0,
+        total_frames=6,
+        H=H,
+        steps=4,
+        generator=gen2,
+        yaw_align=True,
+    )
+    assert out1.shape == (6, D)
+    assert torch.allclose(out1, out2)

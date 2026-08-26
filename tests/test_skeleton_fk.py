@@ -18,6 +18,40 @@ def test_topology_shapes_are_consistent():
         assert 0 <= p < j  # every parent index precedes its child (a valid tree order)
 
 
+def test_joint_parents_match_canonical_smpl_kinematic_tree():
+    # The standard published SMPL kinematic tree (root + 21 body joints + 2 hands,
+    # e.g. as used in the original SMPL paper and reproduced identically in smplx /
+    # human_body_prior reference implementations). We only model the first 22 (hands
+    # dropped), so this pins our JOINT_PARENTS against that reference's prefix.
+    canonical_24_joint_parents = [
+        -1,
+        0,
+        0,
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        9,
+        9,
+        12,
+        13,
+        14,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+    ]
+    assert JOINT_PARENTS == canonical_24_joint_parents[:NUM_JOINTS]
+
+
 def test_identity_rotations_reproduce_cumulative_rest_offsets():
     offsets = torch.tensor(REST_OFFSETS)
     identity = torch.eye(3).expand(NUM_JOINTS, 3, 3)

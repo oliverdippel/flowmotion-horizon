@@ -50,6 +50,9 @@ class TrainConfig:
     seed: int = 0
     log_every: int = field(default=50)
     cache_size: int = 64
+    val_every: int = 0  # 0 disables validation-loss tracking entirely
+    val_batches: int = 20
+    yaw_align: bool = False
 
 
 def _distributed_info() -> tuple[int, int, int]:
@@ -71,6 +74,36 @@ def _infinite_batches(loader: DataLoader, sampler: DistributedSampler | None):
             sampler.set_epoch(epoch)
         yield from loader
         epoch += 1
+
+
+def _compute_val_loss(
+    model: torch.nn.Module,
+    val_dataset: MotionWindowDataset,
+    device: torch.device,
+    max_batches: int,
+    batch_size: int = 32,
+) -> float:
+    """Mean flow-matching loss over up to `max_batches` batches of held-out-subject
+    windows -- the same objective as training, just on data the model never trains on.
+    Held-out subjects aren't in the training vocabulary, so this also exercises the
+    null-embedding conditioning path (see model/conditioning.py)."""
+    loader = DataLoader(val_dataset, batch_size=min(batch_size, len(val_dataset)), shuffle=False)
+    was_training = model.training
+    model.eval()
+    total, count = 0.0, 0
+    with torch.no_grad():
+        for i, batch in enumerate(loader):
+            if i >= max_batches:
+                break
+            batch = {k: v.to(device) for k, v in batch.items()}
+            loss = flow_matching_loss(
+                model, batch["past"], batch["target"], batch["subject_id"], batch["action_id"]
+            )
+            total += loss.item()
+            count += 1
+    if was_training:
+        model.train()
+    return total / max(count, 1)
 
 
 def train(cfg: TrainConfig) -> Path:
@@ -112,6 +145,7 @@ def train(cfg: TrainConfig) -> Path:
         normalizer=None,
         target_fps=cfg.target_fps,
         cache_size=cfg.cache_size,
+        yaw_align=cfg.yaw_align,
     )
     if len(train_dataset) == 0:
         raise ValueError(
@@ -154,14 +188,41 @@ def train(cfg: TrainConfig) -> Path:
 
     optimizer = AdamW(model.parameters(), lr=cfg.lr)
 
+    val_dataset = None
+    if cfg.val_every > 0:
+        held_out_set = set(held_out_subjects)
+        held_out_sequences = [s for s in sequences if s.subject_key in held_out_set]
+        val_dataset = MotionWindowDataset(
+            held_out_sequences,
+            subject_vocab,
+            action_vocab,
+            cfg.K,
+            cfg.H,
+            cfg.stride,
+            normalizer=normalizer,  # train-fit stats, not the held-out set's own
+            target_fps=cfg.target_fps,
+            cache_size=cfg.cache_size,
+            yaw_align=cfg.yaw_align,
+        )
+        if len(val_dataset) == 0:
+            if is_main:
+                print("val_every set but the held-out set has zero windows -- skipping validation")
+            val_dataset = None
+
     out_dir = Path(cfg.out_dir)
     writer = None
     log_file = None
+    val_writer = None
+    val_log_file = None
     if is_main:
         out_dir.mkdir(parents=True, exist_ok=True)
         log_file = open(out_dir / "train_log.csv", "w", newline="")
         writer = csv.writer(log_file)
         writer.writerow(["step", "loss"])
+        if val_dataset is not None:
+            val_log_file = open(out_dir / "val_log.csv", "w", newline="")
+            val_writer = csv.writer(val_log_file)
+            val_writer.writerow(["step", "val_loss"])
 
     data_iter = _infinite_batches(loader, sampler)
     model.train()
@@ -178,12 +239,21 @@ def train(cfg: TrainConfig) -> Path:
         if is_main:
             assert writer is not None
             writer.writerow([step, loss.item()])
-            if step % cfg.log_every == 0 or step == cfg.steps - 1:
+            is_last_step = step == cfg.steps - 1
+            if step % cfg.log_every == 0 or is_last_step:
                 world_note = f" (world_size={world_size})" if is_distributed else ""
                 print(f"step {step:5d}  loss {loss.item():.4f}{world_note}")
+            if val_dataset is not None and (step % cfg.val_every == 0 or is_last_step):
+                val_loss = _compute_val_loss(model, val_dataset, device, cfg.val_batches)
+                assert val_writer is not None
+                val_writer.writerow([step, val_loss])
+                print(f"step {step:5d}  val_loss {val_loss:.4f}")
 
-    if is_main and log_file is not None:
-        log_file.close()
+    if is_main:
+        if log_file is not None:
+            log_file.close()
+        if val_log_file is not None:
+            val_log_file.close()
 
     checkpoint_path = out_dir / "model.pt"
     if is_main:

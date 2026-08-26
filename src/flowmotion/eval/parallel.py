@@ -17,6 +17,7 @@ directly: this avoids relying on any particular process start method (`fork` vs.
 from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
@@ -75,6 +76,7 @@ def run_horizon_eval_parallel(
     from flowmotion.train import load_checkpoint
 
     ckpt = load_checkpoint(checkpoint_path)
+    cfg = replace(cfg, yaw_align=ckpt["cfg"].get("yaw_align", False))
     sequences: list[SequenceMeta] = discover_sequences(data_root)
     held_out_keys = set(ckpt["held_out_subjects"])
     held_out_sequences = [s for s in sequences if s.subject_key in held_out_keys]

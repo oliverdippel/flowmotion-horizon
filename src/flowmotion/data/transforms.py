@@ -13,7 +13,9 @@ import torch
 
 from flowmotion.data.rotation_conversions import (
     axis_angle_to_rotation_6d,
+    matrix_to_rotation_6d,
     rotation_6d_to_axis_angle,
+    rotation_6d_to_matrix,
 )
 from flowmotion.data.skeleton import NUM_JOINTS
 
@@ -44,6 +46,59 @@ def recenter_xy(trans: torch.Tensor, reference_xy: torch.Tensor) -> torch.Tensor
     ref = torch.zeros_like(trans[..., 0, :])
     ref[..., :2] = reference_xy
     return trans - ref.unsqueeze(-2)
+
+
+def _root_yaw(root_d6: torch.Tensor) -> torch.Tensor:
+    """root_d6: (6,) root joint's 6D rotation -> scalar yaw (radians) about the (Z) up
+    axis, taken from where the root's local +X axis points, projected onto the
+    horizontal plane. Any fixed local axis works here -- this is used purely to define
+    a canonical heading for alignment, not to recover a physically meaningful "facing
+    direction" (this codebase has no ground truth for that without a real body model)."""
+    r = rotation_6d_to_matrix(root_d6)
+    local_x_world = r[:, 0]
+    return torch.atan2(local_x_world[1], local_x_world[0])
+
+
+def _yaw_matrix(yaw: torch.Tensor) -> torch.Tensor:
+    """scalar yaw -> (3, 3) rotation matrix about the Z axis."""
+    cos, sin = torch.cos(yaw), torch.sin(yaw)
+    zero, one = torch.zeros_like(yaw), torch.ones_like(yaw)
+    return torch.stack(
+        [
+            torch.stack([cos, -sin, zero]),
+            torch.stack([sin, cos, zero]),
+            torch.stack([zero, zero, one]),
+        ]
+    )
+
+
+def yaw_align_window(
+    window: torch.Tensor, reference_frame: int = 0
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """window: (T, D) feature tensor -> (aligned_window, yaw). Rotates the whole window
+    about the up axis so that `reference_frame`'s root faces a canonical heading. Only
+    the root's 6D block (indices [0:6]) and translation x, y change: every other
+    joint's rotation is parent-relative in the kinematic chain and is unaffected by a
+    rigid rotation of the whole body about its vertical axis (see skeleton.py). `yaw`
+    is returned so the transform can be inverted exactly with `yaw_unalign_window`.
+    """
+    yaw = _root_yaw(window[reference_frame, 0:6])
+    align = _yaw_matrix(-yaw)
+    return _apply_yaw(window, align), yaw
+
+
+def yaw_unalign_window(window: torch.Tensor, yaw: torch.Tensor) -> torch.Tensor:
+    """Inverse of `yaw_align_window` given the `yaw` it returned."""
+    return _apply_yaw(window, _yaw_matrix(yaw))
+
+
+def _apply_yaw(window: torch.Tensor, rot: torch.Tensor) -> torch.Tensor:
+    out = window.clone()
+    root_mats = rotation_6d_to_matrix(window[:, 0:6])  # (T, 3, 3)
+    out[:, 0:6] = matrix_to_rotation_6d(rot @ root_mats)
+    trans_xy = window[:, TRANS_START : TRANS_START + 2]  # (T, 2)
+    out[:, TRANS_START : TRANS_START + 2] = trans_xy @ rot[:2, :2].T
+    return out
 
 
 @dataclass

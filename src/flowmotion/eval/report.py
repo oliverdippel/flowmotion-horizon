@@ -38,6 +38,31 @@ def write_csv(df: pd.DataFrame, path: str | Path) -> None:
     df.to_csv(path, index=False)
 
 
+def bootstrap_subject_ci(
+    df: pd.DataFrame, metric: str, n_boot: int = 2000, ci: float = 0.95, seed: int = 0
+) -> dict[int, tuple[float, float]]:
+    """Confidence interval (`ci`, default 95%) for the cross-subject mean of `metric` at
+    each rollout length, via bootstrap resampling of HELD-OUT SUBJECTS -- not individual
+    trial rows -- with replacement. Trials from the same subject (different seed windows
+    or noise draws) are correlated, not independent, so subjects are the resampling
+    unit. Returns {rollout_length: (ci_low, ci_high)}; a length with fewer than 2
+    held-out subjects evaluated gets (nan, nan)."""
+    evaluated = df[~df["skipped"]]
+    rng = np.random.default_rng(seed)
+    result: dict[int, tuple[float, float]] = {}
+    for length, group in evaluated.groupby("rollout_length"):
+        per_subject_mean = group.groupby("subject_id")[metric].mean().to_numpy()
+        n = len(per_subject_mean)
+        if n < 2:
+            result[int(length)] = (float("nan"), float("nan"))
+            continue
+        boot_means = rng.choice(per_subject_mean, size=(n_boot, n), replace=True).mean(axis=1)
+        lo = float(np.percentile(boot_means, (1 - ci) / 2 * 100))
+        hi = float(np.percentile(boot_means, (1 + ci) / 2 * 100))
+        result[int(length)] = (lo, hi)
+    return result
+
+
 def write_json_summary(
     df: pd.DataFrame, path: str | Path, metric_cols: list[str] | None = None
 ) -> None:
@@ -49,6 +74,7 @@ def write_json_summary(
 
     agg = aggregate_by_length(df)
     per_subj = aggregate_by_subject_and_length(df)
+    ci_by_metric = {metric: bootstrap_subject_ci(df, metric) for metric in metric_cols}
 
     summary: dict = {}
     for length in sorted(evaluated["rollout_length"].unique().tolist()):
@@ -58,6 +84,7 @@ def write_json_summary(
             mean_val = float(agg.loc[length, (metric, "mean")])
             std_raw = agg.loc[length, (metric, "std")]
             std_val = 0.0 if pd.isna(std_raw) else float(std_raw)
+            ci_low, ci_high = ci_by_metric[metric][int(length)]
             per_subject_vals = {}
             for subject_id in per_subj.index.get_level_values("subject_id").unique():
                 if (subject_id, length) in per_subj.index:
@@ -65,6 +92,9 @@ def write_json_summary(
             summary[length_key][metric] = {
                 "mean": mean_val,
                 "std": std_val,
+                "ci_95_low": ci_low,
+                "ci_95_high": ci_high,
+                "n_subjects": len(per_subject_vals),
                 "per_subject": per_subject_vals,
             }
 

@@ -18,7 +18,12 @@ import torch
 from torch.utils.data import Dataset
 
 from flowmotion.data.loader import SequenceMeta, load_sequence, resample_to_fps
-from flowmotion.data.transforms import TRANS_START, Normalizer, features_from_numpy
+from flowmotion.data.transforms import (
+    TRANS_START,
+    Normalizer,
+    features_from_numpy,
+    yaw_align_window,
+)
 
 
 def split_subjects(
@@ -67,6 +72,7 @@ class MotionWindowDataset(Dataset):
         normalizer: Normalizer | None,
         target_fps: float = 20.0,
         cache_size: int = 64,
+        yaw_align: bool = False,
     ):
         self.sequences = sequences
         self.K = K
@@ -76,6 +82,7 @@ class MotionWindowDataset(Dataset):
         self.action_vocab = action_vocab
         self.normalizer = normalizer
         self.cache_size = cache_size
+        self.yaw_align = yaw_align
 
         self.subject_keys = [meta.subject_key for meta in sequences]
         self.dataset_names = [meta.dataset_name for meta in sequences]
@@ -104,17 +111,23 @@ class MotionWindowDataset(Dataset):
     def __len__(self) -> int:
         return len(self.windows)
 
+    def _windowed(self, seq_idx: int, start: int) -> torch.Tensor:
+        """(K+H, D) window, recentered (and yaw-aligned if enabled) relative to its own
+        first frame -- the shared preprocessing used by both `__getitem__` and
+        `iter_recentered_windows`, so the two can't silently disagree."""
+        feat = self._get_features(seq_idx)
+        window = feat[start : start + self.K + self.H].clone()
+        ref_xy = window[0, TRANS_START : TRANS_START + 2].clone()
+        window[:, TRANS_START : TRANS_START + 2] -= ref_xy
+        if self.yaw_align:
+            window, _yaw = yaw_align_window(window)
+        return window
+
     def __getitem__(self, idx: int) -> dict:
         seq_idx, start = self.windows[idx]
-        feat = self._get_features(seq_idx)
-        K, H = self.K, self.H
-
-        past = feat[start : start + K].clone()
-        target = feat[start + K : start + K + H].clone()
-
-        reference_xy = past[0, TRANS_START : TRANS_START + 2].clone()
-        past[:, TRANS_START : TRANS_START + 2] -= reference_xy
-        target[:, TRANS_START : TRANS_START + 2] -= reference_xy
+        window = self._windowed(seq_idx, start)
+        past = window[: self.K]
+        target = window[self.K : self.K + self.H]
 
         if self.normalizer is not None:
             past = self.normalizer.transform(past)
@@ -131,12 +144,9 @@ class MotionWindowDataset(Dataset):
         }
 
     def iter_recentered_windows(self):
-        """Yields each (K+H, D) window, recentered but NOT normalized, one at a time --
-        for streaming normalizer fitting (`Normalizer.fit_streaming`) without ever
-        materializing the whole corpus as one in-memory tensor."""
+        """Yields each (K+H, D) window, recentered (and yaw-aligned if enabled) but NOT
+        normalized, one at a time -- for streaming normalizer fitting
+        (`Normalizer.fit_streaming`) without ever materializing the whole corpus as one
+        in-memory tensor."""
         for seq_idx, start in self.windows:
-            feat = self._get_features(seq_idx)
-            window = feat[start : start + self.K + self.H].clone()
-            ref_xy = window[0, TRANS_START : TRANS_START + 2].clone()
-            window[:, TRANS_START : TRANS_START + 2] -= ref_xy
-            yield window
+            yield self._windowed(seq_idx, start)
