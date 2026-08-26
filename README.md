@@ -50,32 +50,43 @@ function of rollout length*, on subjects the model never saw during training.
 
 ## Results (real AMASS data)
 
-Trained on real AMASS data — ACCAD + BMLhandball + HumanEva (929 sequences, 33
-subjects, 28 train / 5 held out) — for 15,000 steps (~14 min on CPU; training loss
-2.29 → ~0.3). Evaluated on the 5 held-out real subjects:
+Trained on 7 real AMASS sub-datasets — ACCAD, BMLhandball, BMLmovi, HumanEva,
+MPI_HDM05, SFU, TotalCapture (3,026 sequences, 135 subjects, 115 train / 20 held
+out) — for 20,000 steps (~42 min on CPU; d_model=384, 6 layers; training loss
+2.24 → ~0.28). Evaluated on all 20 held-out real subjects, 3 seed windows each:
 
 ![Horizon-stability metrics on real AMASS data](assets/horizon_curves_example.png)
 
-The headline metric — free-vs-teacher-forced divergence — climbs cleanly with
-rollout length (0.96 → 1.50 → 1.56 → 2.00 across lengths 30/60/90/150): the core
-signal this harness exists to catch is showing up on real data with a real,
-lightly-trained model. Foot-skate/jerk/drift are noisier at this scale — only 5
-held-out subjects, shrinking further at longer lengths as sequences run out of
-frames — so treat those three as directional, not final, until the held-out pool
-grows.
+The headline metric — free-vs-teacher-forced divergence — climbs sharply and
+*accelerates* with rollout length: **1.02 → 2.56 → 4.39 → 5.95 → 11.05** across
+lengths 30/60/90/150/300. That's not a fluke of a small held-out set: this is 20
+real subjects, 3,121 evaluated trials. The core signal this harness exists to
+catch — rollouts that look fine early and compound error later — is showing up
+clearly on real data. Distributional drift (speed z-score) shows the same
+directional trend (0.42 → 0.38 → 0.41 → 0.47 → 0.68). Foot-skate and jerk stay
+noisy at this scale (wide std bands, genuine ground-contact frames are rare for
+this rig — see limitations) — read those two as inconclusive, not as evidence of
+anything either way.
 
 ![Free rollout vs. teacher-forced rollout](assets/rollout_comparison_example.gif)
 
-*(Sample visualization, not cherry-picked for quality — this is what a real, briefly
-trained checkpoint actually produces. Re-run `flowmotion visualize` on a longer-
-trained checkpoint to see it improve.)*
+*(Sample visualization, not cherry-picked for quality — this is what this
+checkpoint actually produces on a held-out subject. It's a small model trained in
+under an hour on a modest slice of AMASS, not a polished generator.)*
 
-Two real bugs were caught and fixed by actually running this against real data
-rather than only the synthetic fixture (see commit history): a non-motion
-`shape.npz` file in real AMASS subject directories that crashed the loader, and a
-foot-contact detector that silently reported zero contact because it assumed
-"ground" was at world-height 0 — which held for the synthetic fixture by
-construction but not for this codebase's approximate skeleton on real geometry.
+Three real bugs were caught and fixed by actually running this against real data
+rather than only the synthetic fixture (see commit history):
+1. A non-motion `shape.npz` file in real AMASS subject directories crashed the
+   loader (it assumed every `.npz` under a subject dir was a motion sequence).
+2. The foot-contact detector silently reported zero contact frames because it
+   assumed "ground" was at world-height 0 — true for the synthetic fixture by
+   construction, not for this codebase's approximate skeleton on real geometry.
+3. The normalizer's std floor (`eps`) was sized for numerical safety (1e-6), not
+   for real data: some joints (the spine) barely rotate across the whole corpus,
+   giving a few channels a genuine std as low as ~1e-6. Dividing by that turned
+   floating-point noise into huge normalized targets and blew training loss up
+   into the millions on the bigger model. Fixed by flooring `eps` to a value in
+   feature units (1e-2) instead of machine-epsilon units — with a regression test.
 
 ## Quickstart
 
@@ -108,14 +119,14 @@ Download AMASS body-pose data (SMPL+H format) from https://amass.is.tue.mpg.de
 automate that), extract each downloaded dataset archive into one common directory
 so you get `<root>/<dataset_name>/<subject>/<sequence>.npz`, then either pass
 `--data-root /path/to/amass` or `export AMASS_ROOT=/path/to/amass`. No code changes
-needed — this has been verified end to end against real ACCAD/BMLhandball/HumanEva
-downloads (see amass_format.py for the exact key/shape contract, confirmed against
-real files).
+needed — this has been verified end to end against real downloads across 7 AMASS
+sub-datasets (see amass_format.py for the exact key/shape contract, confirmed
+against real files).
 
 For a larger real corpus, pass `--cache-size` to `train` large enough to comfortably
 exceed your total sequence count (the default of 64 is sized for quick/small runs;
-raise it once training data no longer fits that scope) so the dataset stays fully
-cached after the first pass instead of repeatedly re-decompressing files.
+the 7-dataset, 3,026-sequence run above used `--cache-size 3500`) so the dataset
+stays fully cached after the first pass instead of repeatedly re-decompressing files.
 
 If you use AMASS data, cite it per their license:
 
@@ -169,10 +180,16 @@ gaps found and not yet closed — not silent bugs:
   multiple draws — a known variance gap, flagged rather than hidden.
 - **10-step Euler ODE integration** at sampling time is a standard default for
   flow-matching, not empirically tuned.
-- **Held-out sample size**: the results above use 5 held-out real subjects, which
-  is enough for the divergence-vs-length trend to read clearly but not enough for
-  foot-skate/jerk/drift to be statistically solid on their own — more held-out
-  subjects (more AMASS sub-datasets) would tighten those.
+- **Foot-contact is genuinely rare at this rig's scale.** Even with the
+  data-calibrated floor (`estimate_foot_floor`), 20 held-out subjects across
+  diverse activities (handball, martial arts, running) rarely produce frames within
+  the contact margin of that floor except at the longest rollout lengths — the
+  foot-skate metric is real and correctly calibrated, but low sample counts make it
+  more a "watch this as the held-out pool grows" signal than a solid number yet.
+  Jerk is similarly noisy (wide std bands) at this training budget.
+- **This is a 20K-step, ~40-min-CPU model on a slice of AMASS**, not a converged
+  motion generator — the visualization GIF should be read as "does the pipeline
+  work end to end," not as generation quality.
 
 ## Citation
 

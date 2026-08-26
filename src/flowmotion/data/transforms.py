@@ -52,14 +52,25 @@ class Normalizer:
     std: torch.Tensor  # (D,)
 
     @classmethod
-    def fit(cls, features: torch.Tensor, eps: float = 1e-6) -> Normalizer:
-        """features: (N, D) -- statistics computed over the leading (sample) dim only."""
+    def fit(cls, features: torch.Tensor, eps: float = 1e-2) -> Normalizer:
+        """features: (N, D) -- statistics computed over the leading (sample) dim only.
+
+        `eps` floors std, not just to avoid division by exactly zero but to cap how much
+        a near-frozen channel gets amplified. Verified on real AMASS data: spine joints
+        barely rotate across the corpus, giving some 6D-rotation channels a genuine std
+        as low as ~1e-6 -- a machine-epsilon-sized floor would let normalization divide
+        by that and blow tiny floating-point noise up into huge normalized targets
+        (this destabilized an early real training run into million-scale loss). eps is
+        in feature units (rotation-6D components and translation meters are both O(1)),
+        so 1e-2 is "don't bother resolving variation smaller than this," not a numerical
+        safety valve.
+        """
         mean = features.mean(dim=0)
         std = features.std(dim=0).clamp(min=eps)
         return cls(mean=mean, std=std)
 
     @classmethod
-    def fit_streaming(cls, windows: Iterable[torch.Tensor], eps: float = 1e-6) -> Normalizer:
+    def fit_streaming(cls, windows: Iterable[torch.Tensor], eps: float = 1e-2) -> Normalizer:
         """Same statistics as `fit`, but consumes an iterable of (T, D) tensors one at a
         time (e.g. `MotionWindowDataset.iter_recentered_windows()`) via running sum/sum-
         of-squares, so the whole corpus is never materialized as one in-memory tensor."""
