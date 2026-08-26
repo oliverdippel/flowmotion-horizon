@@ -28,7 +28,7 @@ jobs:
           uv run ruff format --check .
 
       - name: Type check
-        run: uv run mypy src/flowmotion
+        run: uv run mypy src/flowmotion scripts
 
       - name: Test
         run: uv run pytest -q

@@ -2,104 +2,127 @@
 
 [![CI](https://github.com/oliverdippel/flowmotion-horizon/actions/workflows/ci.yml/badge.svg)](https://github.com/oliverdippel/flowmotion-horizon/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](pyproject.toml)
 
-Conditional flow matching for human motion on AMASS, plus a **horizon-stability
-evaluation harness** — the actual point of this repo.
+flowmotion-horizon trains a conditional flow-matching model for human motion on AMASS
+and evaluates it with a horizon-stability harness: matched free and teacher-forced
+autoregressive rollouts from held-out subjects, scored by foot skate, jerk,
+distributional drift, and free-vs-teacher-forced divergence as a function of rollout
+length. The model exists to give the harness something to evaluate against; the
+harness, not the model, is the deliverable.
 
-## The problem
+## Problem
 
-Generative motion models are usually judged on how a rollout looks for the first
-second or two. That's not the failure mode that burns teams shipping to partners: a
-model whose autoregressive rollout looks clean for 30 frames and quietly collapses
-by 90 is a much more common and much more expensive surprise. This repo builds a
-small conditional flow-matching model as something real to evaluate, then spends
-its actual effort on a harness that measures *how rollout quality degrades as a
-function of rollout length*, on subjects the model never saw during training.
+Motion-generation models are usually evaluated on short rollouts, where autoregressive
+error has not yet compounded. A model that looks correct for 30 frames and diverges by
+90 will pass a visual check and fail in deployment. This repository treats rollout
+length as an evaluation axis instead of a fixed setting: every metric is computed at
+several lengths, and the resulting curve — not a single-length number — is what the
+harness reports.
 
-## What's here
+Two rollouts are compared at each length:
 
-- **Model**: a conditional flow-matching (rectified-flow) velocity field over
-  windows of AMASS body pose, conditioned on a past-frame window plus subject and
-  action/dataset embeddings (`src/flowmotion/model/`).
-- **Data**: a real AMASS-format loader (`src/flowmotion/data/loader.py`), lazily
-  loaded with a bounded LRU cache so training scales past what fits in memory, and a
-  deterministic synthetic fixture generator that reproduces the same on-disk format
-  (`src/flowmotion/data/synthetic.py`) — used so this repo runs and tests fully
-  without needing AMASS itself, which is license-gated and can't be auto-downloaded.
-- **The harness** (`src/flowmotion/eval/`): for held-out subjects, runs matched
-  *free* rollouts (fed their own predictions back in) and *teacher-forced* rollouts
-  (re-anchored to real data every step) from the same seed, and reports, as a
-  function of rollout length:
-  - **foot skate** — horizontal drift of a foot joint during ground contact, with
-    the floor height calibrated from real reference data rather than assumed
-  - **jerk** — mean squared third derivative of joint position (smoothness /
-    jitter proxy)
-  - **free-vs-teacher-forced divergence** — the primary "does it collapse" signal:
-    since a generative rollout has no ground truth beyond the seed, this isolates
-    compounding self-conditioning error by comparing a rollout against a version of
-    itself that's kept honest with real data at every step
-  - **distributional drift** — z-score deviation of the rollout's trailing-window
-    speed/acceleration from real held-out statistics
+- **free** — each predicted window is fed back in as the next conditioning window
+  (standard autoregressive generation).
+- **teacher-forced** — the same model, same seed window, same RNG state, but
+  conditioned on real data at every step instead of its own output.
 
-  All four are reported per held-out subject and aggregated (mean ± std) across
-  subjects, so it's visible whether collapse is universal or subject-specific.
-- **Visualization** (`src/flowmotion/viz.py`): renders a free-rollout-vs-teacher-
-  forced comparison as an animated GIF, so collapse is something you watch, not just
-  a number in a CSV.
+Both start from the same real seed window and consume the same noise draws (a
+`torch.Generator` seeded identically for both, consumed in the same order). Their
+divergence in world joint-position space isolates compounding self-conditioning
+error, since that's the only thing differing between the two runs.
 
-## Results (real AMASS data)
+## Method
 
-Trained on 7 real AMASS sub-datasets — ACCAD, BMLhandball, BMLmovi, HumanEva,
-MPI_HDM05, SFU, TotalCapture (3,026 sequences, 135 subjects, 115 train / 20 held
-out) — for 20,000 steps (~42 min on CPU; d_model=384, 6 layers; training loss
-2.24 → ~0.28). Evaluated on all 20 held-out real subjects, 3 seed windows each:
+**Model** (`src/flowmotion/model/`): a rectified-flow / conditional flow-matching
+velocity field. Given a target window `x1` and Gaussian noise `x0` of the same shape,
+the training pair is `x_t = (1-t) x0 + t x1`, `u_t = x1 - x0` for `t ~ U(0,1)`, and the
+network `v_theta` is trained to regress `u_t` from `(x_t, t, past, subject, action)`
+under MSE loss (`model/flow_matching.py`). Sampling integrates `dx/dt = v_theta(x, t,
+...)` from `t=0` to `t=1` with fixed-step Euler (10 steps by default; `rollout.py`).
 
-![Horizon-stability metrics on real AMASS data](assets/horizon_curves_example.png)
+`v_theta` (`model/network.py`, `VelocityTransformer`) is a bidirectional
+`nn.TransformerEncoder` over a token sequence `[t, subject, action, past_0..K-1,
+target_0..H-1]` (length `3+K+H`, `K=H=10` by default). Time is a sinusoidal embedding
+through a small MLP; subject and action are learned embeddings with a null token and
+training-time dropout (`model/conditioning.py`), so a held-out subject — never in the
+training vocabulary — is conditioned on the null embedding instead of raising an
+out-of-vocabulary error. Conditioning is injected as extra tokens, not AdaLN
+modulation, which keeps the implementation to a stock encoder rather than a custom
+transformer block.
 
-The headline metric — free-vs-teacher-forced divergence — climbs sharply and
-*accelerates* with rollout length: **1.02 → 2.56 → 4.39 → 5.95 → 11.05** across
-lengths 30/60/90/150/300. That's not a fluke of a small held-out set: this is 20
-real subjects, 3,121 evaluated trials. The core signal this harness exists to
-catch — rollouts that look fine early and compound error later — is showing up
-clearly on real data. Distributional drift (speed z-score) shows the same
-directional trend (0.42 → 0.38 → 0.41 → 0.47 → 0.68). Foot-skate and jerk stay
-noisy at this scale (wide std bands, genuine ground-contact frames are rare for
-this rig — see limitations) — read those two as inconclusive, not as evidence of
-anything either way.
+**Pose representation**: AMASS SMPL+H `poses` are sliced to the root + 21 body joints
+(hands dropped) and converted from axis-angle to 6D continuous rotations (Zhou et al.,
+CVPR 2019) — axis-angle has a discontinuity near ±π that makes it a poor regression
+target for a velocity field. Each frame is a 135-dim vector: 22 joints × 6D + 3D root
+translation. Root translation is recentered per window (subtract the window's
+first-frame x, y) before z-scoring.
 
-![Free rollout vs. teacher-forced rollout](assets/rollout_comparison_example.gif)
+**Data** (`src/flowmotion/data/`): `loader.py` reads AMASS's native
+`<dataset>/<subject>/<sequence>.npz` layout; `synthetic.py` generates fixtures with the
+identical layout and key contract, so tests and the `demo` command run without AMASS.
+`dataset.py` builds a `MotionWindowDataset` whose window index is computed from
+file-header metadata alone (sequence length, framerate) — no sequence is loaded until
+one of its windows is requested, and loaded sequences sit in a bounded LRU cache
+(`cache_size`), so training on a multi-GB corpus doesn't require holding it all in
+memory. The subject/held-out split (`split_subjects`) operates on the set of unique
+subjects, not sequences, so a subject with many sequences can't leak across the split.
 
-*(Sample visualization, not cherry-picked for quality — this is what this
-checkpoint actually produces on a held-out subject. It's a small model trained in
-under an hour on a modest slice of AMASS, not a polished generator.)*
+**Evaluation** (`src/flowmotion/eval/`): for each held-out subject, `harness.py` runs
+matched free/teacher-forced rollouts at several lengths and computes:
 
-Three real bugs were caught and fixed by actually running this against real data
-rather than only the synthetic fixture (see commit history):
-1. A non-motion `shape.npz` file in real AMASS subject directories crashed the
-   loader (it assumed every `.npz` under a subject dir was a motion sequence).
-2. The foot-contact detector silently reported zero contact frames because it
-   assumed "ground" was at world-height 0 — true for the synthetic fixture by
-   construction, not for this codebase's approximate skeleton on real geometry.
-3. The normalizer's std floor (`eps`) was sized for numerical safety (1e-6), not
-   for real data: some joints (the spine) barely rotate across the whole corpus,
-   giving a few channels a genuine std as low as ~1e-6. Dividing by that turned
-   floating-point noise into huge normalized targets and blew training loss up
-   into the millions on the bigger model. Fixed by flooring `eps` to a value in
-   feature units (1e-2) instead of machine-epsilon units — with a regression test.
+- `foot_skate` — horizontal displacement of a foot joint during frames classified as
+  ground contact (height near a calibrated floor, low vertical velocity).
+- `mean_squared_jerk` — third derivative of joint position; a smoothness proxy.
+- `distributional_drift` — z-score of the rollout's trailing-window speed/acceleration
+  against real held-out reference statistics.
+- `rollout_divergence` — per-frame L2 distance between the free and teacher-forced
+  trajectories.
 
-## Quickstart
+All four are computed from joint positions produced by forward kinematics
+(`data/skeleton.py`) over a fixed, hand-specified skeleton — there is no real SMPL body
+model in this repository (see Limitations).
+
+## Repository structure
+
+```
+src/flowmotion/
+  model/            velocity network, label embeddings, flow-matching loss
+  data/             AMASS loader, synthetic fixture generator, rotation conversions,
+                    skeleton + forward kinematics, windowed dataset, normalization
+  eval/             metrics, evaluation harness, CSV/JSON/plot output
+  rollout.py        Euler ODE integration, free and teacher-forced rollout
+  viz.py            renders a free-vs-teacher-forced comparison as a GIF
+  train.py          training loop and checkpointing
+  cli.py            `flowmotion` command-line entry point
+tests/              46 tests: rotation-matrix round-trips, forward-kinematics
+                    correctness, subject-split leakage, each metric against a
+                    hand-constructed sequence with a known answer, rollout shapes,
+                    and an end-to-end smoke test
+scripts/            standalone analysis scripts, not part of the installed package
+assets/             example outputs referenced under Results
+```
+
+## Installation
+
+Requires Python ≥3.10. Dependency resolution and the CPU-only PyTorch wheel index are
+both handled by `uv` (configured in `pyproject.toml`):
 
 ```bash
 uv sync --extra dev
+```
+
+## Usage
+
+Without any data:
+
+```bash
 uv run flowmotion demo --out ./runs/demo
 ```
 
-`demo` generates a synthetic fixture, trains a tiny model for a couple hundred
-steps, runs the horizon eval, and writes `./runs/demo/eval_report/horizon_curves.png`
-— one panel per metric, x-axis = rollout length. That plot is the point.
+generates a synthetic fixture, trains a small model for 200 steps, runs the eval
+harness, and writes `runs/demo/eval_report/horizon_curves.png`.
 
-Or run each stage by hand:
+The individual stages:
 
 ```bash
 uv run flowmotion prepare-fixture --out ./data/synthetic_amass
@@ -112,95 +135,127 @@ uv run flowmotion visualize --checkpoint ./runs/tiny/model.pt --data-root ./data
     --subject Dataset0/subject00 --length 90 --out ./runs/tiny/rollout.gif
 ```
 
-## Using real AMASS data
+With real AMASS data: download SMPL+H body-pose data from
+https://amass.is.tue.mpg.de (registration and license acceptance happen on their
+site; this repository does not automate that), extract each dataset archive into one
+directory so the layout is `<root>/<dataset>/<subject>/<sequence>.npz`, then pass
+`--data-root /path/to/amass` or set `AMASS_ROOT`. No code path differs between the
+synthetic fixture and real data — `discover_sequences`/`load_sequence` read both
+identically.
 
-Download AMASS body-pose data (SMPL+H format) from https://amass.is.tue.mpg.de
-(registration + license acceptance required — this repo cannot and does not
-automate that), extract each downloaded dataset archive into one common directory
-so you get `<root>/<dataset_name>/<subject>/<sequence>.npz`, then either pass
-`--data-root /path/to/amass` or `export AMASS_ROOT=/path/to/amass`. No code changes
-needed — this has been verified end to end against real downloads across 7 AMASS
-sub-datasets (see amass_format.py for the exact key/shape contract, confirmed
-against real files).
+## Configuration
 
-For a larger real corpus, pass `--cache-size` to `train` large enough to comfortably
-exceed your total sequence count (the default of 64 is sized for quick/small runs;
-the 7-dataset, 3,026-sequence run above used `--cache-size 3500`) so the dataset
-stays fully cached after the first pass instead of repeatedly re-decompressing files.
+`TrainConfig` (`train.py`) and `EvalConfig` (`eval/harness.py`) are plain dataclasses.
+The parameters worth knowing about:
 
-If you use AMASS data, cite it per their license:
+| Parameter | Default | Notes |
+|---|---|---|
+| `K`, `H` | 10, 10 | past-window / target-window length in frames at 20 fps; `K == H` so a predicted window can be fed straight back in as the next past window |
+| `stride` | 5 | window stride when building the training index |
+| `d_model`, `n_layers`, `n_heads` | 256, 4, 4 | transformer size |
+| `p_label_dropout` | 0.1 | probability of replacing subject/action with the null token during training |
+| `held_out_frac` | 0.15 | fraction of unique subjects held out, not sequences |
+| `cache_size` | 64 | resident sequences in the dataset's LRU cache; raise above your total sequence count for a real corpus (the run below used 3500) |
+| `rollout_lengths` | `[30, 60, 90, 150, 300]` | evaluated per held-out subject; a length longer than a given sequence is skipped and recorded, not silently dropped |
+| `seeds_per_subject` | 2 | non-overlapping seed windows per sequence |
+| `ode_steps` | 10 | Euler steps at sampling time |
 
-> Mahmood, N., Ghorbani, N., Troje, N. F., Pons-Moll, G., & Black, M. J. (2019).
-> AMASS: Archive of Motion Capture as Surface Shapes. *ICCV*.
+## Implementation notes
 
-## Development
+- **Matched RNG between free and teacher-forced rollouts.** Both use a fresh
+  `torch.Generator` seeded identically before each trial and consume it in the same
+  order (one noise draw per window). The two trajectories are therefore identical up
+  to the point where the free rollout starts conditioning on its own output, which is
+  exactly what the divergence metric isolates.
+- **`torch.no_grad()` in `integrate_velocity`.** Sampling doesn't need gradients;
+  without this, every rollout call — the eval harness runs thousands per run — built
+  an autograd graph for no reason. Found while adding the visualizer.
+- **Normalizer `eps` floor.** `Normalizer.fit`/`fit_streaming` floor per-channel std at
+  `eps=1e-2`, not a numerically-minimal value. Some joints (the spine) barely rotate
+  across a real AMASS corpus, giving a few channels a genuine std around `1e-6`;
+  dividing by that turns floating-point noise into large normalized targets. This
+  surfaced when scaling training to 3,026 real sequences, where it destabilized loss
+  into the millions. `eps` is chosen in feature units — rotation-6D components and
+  translation in meters are both O(1) — rather than as a division-by-zero guard.
+- **Foot-contact floor is calibrated from data, not assumed.** `estimate_foot_floor`
+  takes the 1st percentile of a foot joint's height across real held-out sequences and
+  uses that as "ground," instead of assuming world-height 0. The latter holds for the
+  synthetic fixture by construction but not for this repository's fixed skeleton on
+  real geometry — verified: real ground-truth sequences never bring a foot below
+  roughly 0.5–0.6 m under this rig's forward kinematics.
+- **Subject-level, not sequence-level, splitting.** `split_subjects` operates on the
+  set of unique `subject_key`s. A sequence-level split would let a subject's other
+  sequences leak into the training set; `tests/test_dataset_split.py` checks this
+  directly, including a test that a sequence-level split would in fact be caught by
+  the same assertion.
+
+## Results
+
+Trained on 7 AMASS sub-datasets (ACCAD, BMLhandball, BMLmovi, HumanEva, MPI_HDM05,
+SFU, TotalCapture — 3,026 sequences, 135 subjects, 115 train / 20 held out):
 
 ```bash
-uv sync --extra dev
-uv run pytest -q
-uv run ruff check .
-uv run ruff format --check .
-uv run mypy src/flowmotion
+uv run flowmotion train --data-root /path/to/amass --out ./runs/real_v2 \
+    --steps 20000 --batch-size 64 --cache-size 3500 --d-model 384 --n-layers 6 --n-heads 6
+uv run flowmotion eval --checkpoint ./runs/real_v2/model.pt --data-root /path/to/amass \
+    --lengths 30,60,90,150,300 --seeds-per-subject 3 --out-dir ./runs/real_v2/eval_report
 ```
 
-Optional pre-commit hooks (ruff lint/format + basic hygiene checks) are configured
-in `.pre-commit-config.yaml`:
+~42 minutes to train on CPU. Training loss: 2.24 → ~0.28.
 
-```bash
-uv run pre-commit install
-```
+![Horizon-stability metrics](assets/horizon_curves_example.png)
 
-## Limitations / open design calls
+Evaluated on all 20 held-out subjects (3,121 trials): free-vs-teacher-forced
+divergence grows with rollout length — 1.02 → 2.56 → 4.39 → 5.95 → 11.05 across
+lengths 30/60/90/150/300 — the behavior the harness is built to detect. Foot-skate and
+jerk have wide variance at this scale: the held-out pool is small relative to how
+rarely a foot is classified as in ground contact.
 
-This started as a 2-3 day build; the items below are corners cut on purpose or
-gaps found and not yet closed — not silent bugs:
+![Free rollout vs. teacher-forced rollout](assets/rollout_comparison_example.gif)
 
-- **No real SMPL body model.** SMPL/SMPL-H shape (`betas`) is license-gated
-  separately from AMASS mocap data, so forward kinematics uses a hardcoded
-  approximate rest-pose bone-offset template (`flowmotion/data/skeleton.py`), not a
-  real per-subject shape. Verified against real data: absolute geometry is
-  noticeably off (e.g. a foot joint's true "floor" sits around world-height
-  0.5-0.6m under this rig, not 0 — `estimate_foot_floor` calibrates around this),
-  though the harness's metrics measure *relative* degradation with rollout length,
-  which survives this. `betas` are still loaded and threaded through the pipeline
-  so a real SMPL FK can be dropped in later.
-- **Joint parent topology** in `skeleton.py` follows the standard published SMPL
-  kinematic tree but hasn't been cross-checked against a canonical SMPL joint table
-  with a real body model — worth verifying if absolute joint positions start to matter.
-- **Up-axis Z-up** — verified against real AMASS files (root translation height sits
-  in a plausible ~0.8-1.0m band consistent with pelvis height above a Z=0 floor).
-- **Root canonicalization** uses simple per-window XY recentering, not full
-  yaw-alignment (rotating each window to face +x) as used in some motion-generation
-  papers (HuMoR, MDM-style). Cheaper to implement correctly; yaw-alignment is a
-  natural next step.
-- **Conditioning injection** uses extra tokens in the transformer sequence, not
-  AdaLN-style modulation (DiT-style) — stock `nn.TransformerEncoder`, smaller
-  surface area for subtle bugs, at some cost to architectural elegance.
-- **Divergence metric uses a single noise seed per trial**, not averaged over
-  multiple draws — a known variance gap, flagged rather than hidden.
-- **10-step Euler ODE integration** at sampling time is a standard default for
-  flow-matching, not empirically tuned.
-- **Foot-contact is genuinely rare at this rig's scale.** Even with the
-  data-calibrated floor (`estimate_foot_floor`), 20 held-out subjects across
-  diverse activities (handball, martial arts, running) rarely produce frames within
-  the contact margin of that floor except at the longest rollout lengths — the
-  foot-skate metric is real and correctly calibrated, but low sample counts make it
-  more a "watch this as the held-out pool grows" signal than a solid number yet.
-  Jerk is similarly noisy (wide std bands) at this training budget.
-- **This is a 20K-step, ~40-min-CPU model on a slice of AMASS**, not a converged
-  motion generator — the visualization GIF should be read as "does the pipeline
-  work end to end," not as generation quality.
+**Ablation.** Same command as above with `--steps 1500` in place of `20000`,
+otherwise identical (same data, architecture, seed — so the held-out split is
+unchanged). Comparing the two models' evaluations on the same held-out set:
+
+![Well-trained vs. undertrained](assets/ablation_comparison.png)
+
+| Metric (mean across lengths) | 20K steps | 1.5K steps | ratio |
+|---|---|---|---|
+| jerk (mean squared) | ~2.5×10⁵ | ~2.8×10⁶ | ~11× |
+| distributional drift (speed z-score) | ~0.47 | ~2.6 | ~5.6× |
+| free-vs-teacher-forced divergence (range) | 1.02–11.05 | 1.38–10.98 | ~1.0–1.35× |
+
+Jerk and distributional drift separate the two models cleanly at every rollout length.
+Divergence — the metric this repository is built around — does not: both models
+converge to nearly the same value by length 300. At this scale, divergence appears to
+track rollout length more than training quality; jerk and drift are the more sensitive
+indicators here. This is reported as observed on this run, not as a general claim
+about the metric.
+
+## Limitations
+
+- **No real SMPL body model.** `betas`-conditioned shape is license-gated separately
+  from AMASS mocap data. `skeleton.py` uses a fixed, hand-specified bone-offset
+  template instead of a per-subject shape, so absolute joint positions are
+  approximate. The evaluation metrics are relative (degradation vs. rollout length, or
+  deviation from a calibrated reference), which is largely insensitive to this, but
+  the output should not be read as calibrated geometry.
+- **Joint parent topology** follows the standard SMPL kinematic tree but has not been
+  cross-checked against a canonical joint table with a real body model.
+- **Root canonicalization** is per-window x, y recentering, not full yaw alignment
+  (rotating each window to face a fixed direction, as in HuMoR/MDM-style pipelines).
+- **Single noise seed per divergence trial** — not averaged over multiple draws.
+- **Held-out set size.** 20 subjects is enough for the divergence-vs-length trend to
+  be visible but not for per-metric confidence intervals; foot-skate in particular has
+  few ground-contact frames at this scale.
+- 10-step Euler integration and the `p_label_dropout=0.1` / `held_out_frac=0.15`
+  defaults are standard choices, not tuned against a validation objective.
 
 ## Citation
 
-```bibtex
-@software{flowmotion_horizon,
-  author = {Dippel, Oliver},
-  title = {flowmotion-horizon: Conditional Flow Matching on AMASS with a Horizon-Stability Evaluation Harness},
-  url = {https://github.com/oliverdippel/flowmotion-horizon},
-  year = {2026}
-}
-```
+AMASS's license requires citing it if you use the data:
 
-See `CITATION.cff`. If you use AMASS data with this code, also cite AMASS itself
-(above) — that's a condition of their license, not just courtesy.
+> Mahmood, N., Ghorbani, N., Troje, N. F., Pons-Moll, G., & Black, M. J. (2019). AMASS:
+> Archive of Motion Capture as Surface Shapes. *ICCV*.
+
+This repository: see `CITATION.cff`.
