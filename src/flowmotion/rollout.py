@@ -13,6 +13,8 @@ the eval harness's divergence metric to isolate compounding self-conditioning er
 
 from __future__ import annotations
 
+from typing import Protocol
+
 import torch
 
 from flowmotion.data.transforms import TRANS_START, Normalizer, yaw_align_window, yaw_unalign_window
@@ -153,3 +155,100 @@ def teacher_forced_rollout(
     if not frames_out:
         return torch.zeros(0, D, device=device)
     return torch.cat(frames_out, dim=0)[:total_frames]
+
+
+class Roller(Protocol):
+    """What the eval harness needs to run matched free/teacher-forced rollouts, without
+    caring whether the underlying predictor is a trained model or a trivial baseline
+    (see `flowmotion.baseline.ZeroVelocityRoller`) -- `eval.harness._run_trials` is
+    written against this interface, not against `VelocityTransformer` directly."""
+
+    K: int
+    H: int
+
+    def eval(self) -> None: ...
+
+    def free(
+        self,
+        seed_past_abs: torch.Tensor,
+        subject_id: int,
+        action_id: int,
+        total_frames: int,
+        generator: torch.Generator | None,
+    ) -> torch.Tensor: ...
+
+    def teacher_forced(
+        self,
+        real_sequence_abs: torch.Tensor,
+        seed_start_idx: int,
+        subject_id: int,
+        action_id: int,
+        total_frames: int,
+        generator: torch.Generator | None,
+    ) -> torch.Tensor: ...
+
+
+class ModelRoller:
+    """Adapts the trained flow-matching model + normalizer to the `Roller` interface."""
+
+    def __init__(
+        self,
+        model,
+        normalizer: Normalizer,
+        steps: int = 10,
+        yaw_align: bool = False,
+    ) -> None:
+        self.model = model
+        self.normalizer = normalizer
+        self.steps = steps
+        self.yaw_align = yaw_align
+        self.K = model.K
+        self.H = model.H
+
+    def eval(self) -> None:
+        self.model.eval()
+
+    def free(
+        self,
+        seed_past_abs: torch.Tensor,
+        subject_id: int,
+        action_id: int,
+        total_frames: int,
+        generator: torch.Generator | None,
+    ) -> torch.Tensor:
+        return free_rollout(
+            self.model,
+            self.normalizer,
+            seed_past_abs,
+            subject_id,
+            action_id,
+            total_frames=total_frames,
+            H=self.H,
+            steps=self.steps,
+            generator=generator,
+            yaw_align=self.yaw_align,
+        )
+
+    def teacher_forced(
+        self,
+        real_sequence_abs: torch.Tensor,
+        seed_start_idx: int,
+        subject_id: int,
+        action_id: int,
+        total_frames: int,
+        generator: torch.Generator | None,
+    ) -> torch.Tensor:
+        return teacher_forced_rollout(
+            self.model,
+            self.normalizer,
+            real_sequence_abs,
+            seed_start_idx,
+            subject_id,
+            action_id,
+            total_frames=total_frames,
+            K=self.K,
+            H=self.H,
+            steps=self.steps,
+            generator=generator,
+            yaw_align=self.yaw_align,
+        )

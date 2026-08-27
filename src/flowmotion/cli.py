@@ -18,7 +18,7 @@ from flowmotion.data.loader import (
 )
 from flowmotion.data.synthetic import generate_synthetic_amass
 from flowmotion.data.transforms import features_from_numpy
-from flowmotion.eval.harness import EvalConfig, run_horizon_eval
+from flowmotion.eval.harness import EvalConfig, run_baseline_horizon_eval, run_horizon_eval
 from flowmotion.eval.metrics import sequence_features_to_joint_positions
 from flowmotion.eval.parallel import run_horizon_eval_parallel
 from flowmotion.eval.report import plot_horizon_curves, write_csv, write_json_summary
@@ -89,6 +89,20 @@ def _build_parser() -> argparse.ArgumentParser:
         default=1,
         help="shard held-out sequences across N worker processes (1 = run in-process)",
     )
+
+    p_eval_baseline = sub.add_parser(
+        "eval-baseline",
+        help="run the zero-velocity baseline through the same eval harness, for comparison",
+    )
+    p_eval_baseline.add_argument(
+        "--checkpoint",
+        required=True,
+        help="used only for its held-out-subject list and K/H window sizes, not run",
+    )
+    p_eval_baseline.add_argument("--data-root", default=None)
+    p_eval_baseline.add_argument("--lengths", default="30,60,90,150,300")
+    p_eval_baseline.add_argument("--out-dir", required=True)
+    p_eval_baseline.add_argument("--seeds-per-subject", type=int, default=2)
 
     p_demo = sub.add_parser("demo", help="fixture -> tiny train -> eval, end to end")
     p_demo.add_argument("--out", default="./runs/demo")
@@ -226,6 +240,32 @@ def cmd_eval(args: argparse.Namespace) -> None:
     _run_eval_and_report(ckpt, held_out_sequences, cfg, Path(args.out_dir))
 
 
+def cmd_eval_baseline(args: argparse.Namespace) -> None:
+    """Zero-velocity baseline through the exact matched protocol used for the model:
+    same held-out subjects, same K/H, same lengths/seeds, same metrics."""
+    lengths = [int(x) for x in args.lengths.split(",")]
+    ckpt = load_checkpoint(args.checkpoint)
+    cfg = EvalConfig(
+        rollout_lengths=lengths,
+        seeds_per_subject=args.seeds_per_subject,
+        yaw_align=ckpt["cfg"].get("yaw_align", False),
+    )
+    data_root = resolve_data_root(args.data_root)
+    sequences = discover_sequences(data_root)
+    held_out_keys = set(ckpt["held_out_subjects"])
+    held_out_sequences = [s for s in sequences if s.subject_key in held_out_keys]
+
+    df = run_baseline_horizon_eval(
+        ckpt["subject_vocab"],
+        ckpt["action_vocab"],
+        held_out_sequences,
+        cfg,
+        K=ckpt["model"].K,
+        H=ckpt["model"].H,
+    )
+    _write_eval_report(df, Path(args.out_dir))
+
+
 def cmd_demo(args: argparse.Namespace) -> None:
     out_dir = Path(args.out)
     fixture_dir = out_dir / "fixture"
@@ -320,6 +360,7 @@ _COMMANDS = {
     "train": cmd_train,
     "rollout": cmd_rollout,
     "eval": cmd_eval,
+    "eval-baseline": cmd_eval_baseline,
     "demo": cmd_demo,
     "visualize": cmd_visualize,
 }

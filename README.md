@@ -90,16 +90,19 @@ src/flowmotion/
   data/             AMASS loader, synthetic fixture generator, rotation conversions,
                     skeleton + forward kinematics, windowed dataset, normalization
   eval/             metrics, evaluation harness, multi-process eval, CSV/JSON/plot output
-  rollout.py        Euler ODE integration, free and teacher-forced rollout
+  rollout.py        Euler ODE integration, free and teacher-forced rollout, and the
+                    `Roller` interface the eval harness runs against
+  baseline.py       zero-velocity baseline (`ZeroVelocityRoller`), for comparison
   viz.py            renders a free-vs-teacher-forced comparison as a GIF
   train.py          training loop, checkpointing, and distributed (DDP) support
   cli.py            `flowmotion` command-line entry point
-tests/              60 tests: rotation-matrix round-trips, forward-kinematics
+tests/              69 tests: rotation-matrix round-trips, forward-kinematics
                     correctness against the canonical SMPL kinematic tree,
                     subject-split leakage, each metric against a hand-constructed
                     sequence with a known answer, rollout shapes, yaw-alignment
                     rotation invariance, parallel-vs-serial eval agreement,
-                    validation-loss tracking, and an end-to-end smoke test
+                    validation-loss tracking, the zero-velocity baseline, and an
+                    end-to-end smoke test
 scripts/            standalone analysis scripts, not part of the installed package
 assets/             example outputs referenced under Results
 ```
@@ -131,6 +134,9 @@ uv run flowmotion prepare-fixture --out ./data/synthetic_amass
 uv run flowmotion train --data-root ./data/synthetic_amass --out ./runs/tiny --steps 500
 uv run flowmotion eval --checkpoint ./runs/tiny/model.pt --data-root ./data/synthetic_amass \
     --lengths 30,60,90,150,300 --out-dir ./runs/tiny/eval_report
+uv run flowmotion eval-baseline --checkpoint ./runs/tiny/model.pt \
+    --data-root ./data/synthetic_amass --lengths 30,60,90,150,300 \
+    --out-dir ./runs/tiny/baseline_report
 uv run flowmotion rollout --checkpoint ./runs/tiny/model.pt --data-root ./data/synthetic_amass \
     --subject Dataset0/subject00 --length 90 --out ./runs/tiny/rollout.npz
 uv run flowmotion visualize --checkpoint ./runs/tiny/model.pt --data-root ./data/synthetic_amass \
@@ -293,6 +299,46 @@ mild divergence gap at short lengths, which is exactly the kind of appearance th
 noise averaging and CIs are for). At this scale, divergence appears to track
 rollout length more than training quality; jerk and drift are the sensitive
 indicators for training quality specifically.
+
+**Baseline.** Everything above compares the model against itself (a worse version of
+itself, or its own teacher-forced trajectory) — none of it says whether the model is
+better than doing nothing. `flowmotion eval-baseline` runs the standard
+"zero-velocity" baseline from human motion prediction (Martinez et al., "On Human
+Motion Prediction Using Recurrent Neural Networks," CVPR 2017 — repeat the last
+observed frame indefinitely) through the identical matched protocol: same held-out
+subjects, same `K`/`H` window sizes, same lengths and seed windows.
+`ZeroVelocityRoller` (`src/flowmotion/baseline.py`) implements the same `Roller`
+interface the trained model does (`rollout.ModelRoller`), so `eval/harness.py`'s trial
+loop can't silently diverge between the two:
+
+```bash
+uv run flowmotion eval-baseline --checkpoint ./runs/real_v2/model.pt \
+    --data-root /path/to/amass --lengths 30,60,90,150,300 --seeds-per-subject 3 \
+    --out-dir ./runs/real_v2/baseline_report
+```
+
+Compared against `eval_report_v2` above (`scripts/compare_runs.py`, full table in
+`assets/baseline_comparison.md`):
+
+![Model vs. zero-velocity baseline](assets/baseline_comparison.png)
+
+| Metric | Result |
+|---|---|
+| jerk (mean squared) | baseline is exactly 0 at every length (no motion, no CI width) — no overlap with the model, but this is not the baseline "winning": jerk alone rewards producing no motion at all, which is exactly the failure mode the ablation's use of it didn't have to contend with |
+| distributional drift (speed z-score) | model is closer to real motion statistics at lengths 60/90/150 (no overlap, model wins); indistinguishable from the baseline at 30 and 300 |
+| distributional drift (accel z-score) | baseline is closer to real motion statistics at **every** length (no overlap, baseline wins) |
+| free-vs-teacher-forced divergence (mean and final) | indistinguishable through length 150; at length 300 the model diverges from its own teacher-forced counterpart significantly more than the baseline diverges from ground truth (no overlap, baseline wins) |
+| foot skate | both near zero — uninformative, as above |
+
+This changes how two of this README's own metrics should be read. Jerk cannot stand
+alone as a quality signal: it's the ablation's most decisive metric, and also the one
+a model that outputs nothing at all wins outright, so a good jerk number only means
+something once drift and divergence have already ruled out degenerate output. And the
+model's acceleration profile is measurably worse than a static pose at every rollout
+length tested — a real, unflattering result, not one the fixed-length visual check
+this repository argues against would have caught either way, since it's a property of
+the model's output from the first predicted frame, not something that emerges from
+compounding error over a rollout.
 
 ## Limitations
 

@@ -30,6 +30,7 @@ from flowmotion.eval.harness import (
     compute_reference_artifacts,
     load_sequences,
 )
+from flowmotion.rollout import ModelRoller
 
 
 def _partition(items: list, n: int) -> list[list]:
@@ -52,9 +53,11 @@ def _eval_shard(
     from flowmotion.train import load_checkpoint  # imported here: must be picklable at spawn
 
     ckpt = load_checkpoint(checkpoint_path)
+    roller = ModelRoller(
+        ckpt["model"], ckpt["normalizer"], steps=cfg.ode_steps, yaw_align=cfg.yaw_align
+    )
     return _run_trials(
-        ckpt["model"],
-        ckpt["normalizer"],
+        roller,
         subject_vocab,
         action_vocab,
         shard,

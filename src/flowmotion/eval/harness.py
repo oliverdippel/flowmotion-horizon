@@ -29,7 +29,7 @@ from flowmotion.eval.metrics import (
     rollout_divergence,
     sequence_features_to_joint_positions,
 )
-from flowmotion.rollout import free_rollout, teacher_forced_rollout
+from flowmotion.rollout import ModelRoller, Roller
 
 LoadedSequence = tuple[SequenceMeta, torch.Tensor]
 
@@ -81,8 +81,7 @@ def compute_reference_artifacts(
 
 
 def _run_trials(
-    model,
-    normalizer: Normalizer,
+    roller: Roller,
     subject_vocab: dict[str, int],
     action_vocab: dict[str, int],
     loaded: list[LoadedSequence],
@@ -91,9 +90,11 @@ def _run_trials(
     foot_floor: dict,
 ) -> list[dict]:
     """The core per-(subject, seed, length) trial loop, independent of how `loaded` was
-    assembled -- the full held-out set (serial path) or one shard of it (parallel path)."""
-    model.eval()
-    K, H = model.K, model.H
+    assembled -- the full held-out set (serial path) or one shard of it (parallel path) --
+    and of what `roller` is: the trained model (`ModelRoller`) or a trivial baseline
+    (`flowmotion.baseline.ZeroVelocityRoller`)."""
+    roller.eval()
+    K = roller.K
     rows: list[dict] = []
 
     for meta, feat in loaded:
@@ -130,31 +131,20 @@ def _run_trials(
                     gen_free = torch.Generator().manual_seed(trial_seed)
                     gen_tf = torch.Generator().manual_seed(trial_seed)
 
-                    free = free_rollout(
-                        model,
-                        normalizer,
+                    free = roller.free(
                         seed_past_abs,
                         subject_id,
                         action_id,
                         total_frames=length,
-                        H=H,
-                        steps=cfg.ode_steps,
                         generator=gen_free,
-                        yaw_align=cfg.yaw_align,
                     )
-                    tf = teacher_forced_rollout(
-                        model,
-                        normalizer,
+                    tf = roller.teacher_forced(
                         feat,
                         start,
                         subject_id,
                         action_id,
                         total_frames=length,
-                        K=K,
-                        H=H,
-                        steps=cfg.ode_steps,
                         generator=gen_tf,
-                        yaw_align=cfg.yaw_align,
                     )
 
                     free_jp = sequence_features_to_joint_positions(free)
@@ -205,9 +195,28 @@ def run_horizon_eval(
 ) -> pd.DataFrame:
     loaded = load_sequences(held_out_sequences, cfg.fps)
     ref_stats, foot_floor = compute_reference_artifacts(loaded, cfg.fps, cfg.trailing_window)
-    rows = _run_trials(
-        model, normalizer, subject_vocab, action_vocab, loaded, cfg, ref_stats, foot_floor
-    )
+    roller = ModelRoller(model, normalizer, steps=cfg.ode_steps, yaw_align=cfg.yaw_align)
+    rows = _run_trials(roller, subject_vocab, action_vocab, loaded, cfg, ref_stats, foot_floor)
+    return pd.DataFrame(rows)
+
+
+def run_baseline_horizon_eval(
+    subject_vocab: dict[str, int],
+    action_vocab: dict[str, int],
+    held_out_sequences: list[SequenceMeta],
+    cfg: EvalConfig,
+    K: int,
+    H: int,
+) -> pd.DataFrame:
+    """Same protocol and metrics as `run_horizon_eval`, with the trained model swapped
+    for `ZeroVelocityRoller`. `K`/`H` should match the model being compared against (the
+    checkpoint's window sizes), so the two runs' seed windows and rollout cadence line up."""
+    from flowmotion.baseline import ZeroVelocityRoller
+
+    loaded = load_sequences(held_out_sequences, cfg.fps)
+    ref_stats, foot_floor = compute_reference_artifacts(loaded, cfg.fps, cfg.trailing_window)
+    roller = ZeroVelocityRoller(K=K, H=H)
+    rows = _run_trials(roller, subject_vocab, action_vocab, loaded, cfg, ref_stats, foot_floor)
     return pd.DataFrame(rows)
 
 
