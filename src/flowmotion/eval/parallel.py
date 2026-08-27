@@ -16,6 +16,7 @@ directly: this avoids relying on any particular process start method (`fork` vs.
 
 from __future__ import annotations
 
+import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import replace
 from pathlib import Path
@@ -91,7 +92,15 @@ def run_horizon_eval_parallel(
     checkpoint_str = str(checkpoint_path)
     rows: list[dict] = []
 
-    with ProcessPoolExecutor(max_workers=len(shards)) as pool:
+    # "spawn", not the platform default (`fork` on Linux): a forked worker inherits
+    # torch's internal thread-pool locks in whatever state they were in at fork
+    # time, which can deadlock the worker outright -- a well-known torch+fork
+    # hazard, independent of anything specific to this code. `spawn` starts each
+    # worker as a fresh interpreter instead, at the cost of re-importing torch and
+    # reloading the checkpoint per worker (already the case here regardless, since
+    # `_eval_shard` reloads the checkpoint itself -- see its docstring).
+    mp_context = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=len(shards), mp_context=mp_context) as pool:
         futures = [
             pool.submit(
                 _eval_shard,
