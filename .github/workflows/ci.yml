@@ -31,4 +31,4 @@ jobs:
         run: uv run mypy src/flowmotion scripts
 
       - name: Test
-        run: uv run pytest -q
+        run: uv run pytest -q --cov=flowmotion --cov-report=term-missing --cov-fail-under=90

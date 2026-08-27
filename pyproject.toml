@@ -28,6 +28,8 @@ flowmotion = "flowmotion.cli:main"
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "coverage-badge>=1.1",
     "ruff>=0.6",
     "mypy>=1.11",
     "pre-commit>=3.8",
@@ -52,6 +54,15 @@ select = ["E", "F", "I", "UP"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["flowmotion"]
+
+[tool.coverage.report]
+# cli.py is argparse wiring around already-tested library functions -- the test
+# suite exercises those functions directly (see tests/test_smoke_e2e.py) rather
+# than through argv, so it's excluded here rather than counted as untested logic.
+omit = ["*/cli.py"]
 
 [tool.mypy]
 ignore_missing_imports = true
