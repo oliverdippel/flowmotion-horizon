@@ -267,22 +267,32 @@ to ~0.
 
 **Ablation.** Same command as above with `--steps 1500` in place of `20000`,
 otherwise identical (same data, architecture, seed — so the held-out split is
-unchanged). Comparing the two models' evaluations on the same held-out set:
+unchanged), evaluated with the identical matched protocol used for the results
+above (3 seed windows × 3 noise draws, 9,363 trials each). Comparing the two
+models' evaluations, with 95% bootstrap CIs over held-out subjects at each length
+(`scripts/compare_runs.py`, full table in `assets/ablation_comparison.md`):
 
 ![Well-trained vs. undertrained](assets/ablation_comparison.png)
 
-| Metric (mean across lengths) | 20K steps | 1.5K steps | ratio |
-|---|---|---|---|
-| jerk (mean squared) | ~2.5×10⁵ | ~2.8×10⁶ | ~11× |
-| distributional drift (speed z-score) | ~0.47 | ~2.6 | ~5.6× |
-| free-vs-teacher-forced divergence (range) | 1.02–11.05 | 1.38–10.98 | ~1.0–1.35× |
+| Metric | 95% CIs overlap at any length? |
+|---|---|
+| jerk (mean squared) | no — separated by ~7.6–10.0× at every length, 30 through 300 |
+| distributional drift (speed z-score) | no — separated by ~4.2–6.1× at every length |
+| distributional drift (accel z-score) | no — separated by ~3.4–4.3× at every length |
+| free-vs-teacher-forced divergence (mean and final) | **yes — at every length** |
+| foot skate | yes (both near zero; uninformative given how rare contact events are) |
 
-Jerk and distributional drift separate the two models cleanly at every rollout length.
-Divergence — the metric this repository is built around — does not: both models
-converge to nearly the same value by length 300. At this scale, divergence appears to
-track rollout length more than training quality; jerk and drift are the more sensitive
-indicators here. This is reported as observed on this run, not as a general claim
-about the metric.
+Under this matched protocol, jerk and distributional drift distinguish the
+well-trained model from the undertrained one cleanly and consistently — not a
+single rollout length where their confidence intervals overlap. Divergence, the
+metric this repository is built around, does not: its intervals overlap at every
+length, meaning this evaluation cannot statistically distinguish the two models on
+divergence alone. That's a real finding, not an artifact of comparing mismatched
+protocols (the first pass at this ablation used a single noise draw and did show a
+mild divergence gap at short lengths, which is exactly the kind of appearance that
+noise averaging and CIs are for). At this scale, divergence appears to track
+rollout length more than training quality; jerk and drift are the sensitive
+indicators for training quality specifically.
 
 ## Limitations
 
