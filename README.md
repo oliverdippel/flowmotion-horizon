@@ -35,6 +35,39 @@ Both start from the same real seed window and consume the same noise draws (a
 divergence in world joint-position space isolates compounding self-conditioning
 error, since that's the only thing differing between the two runs.
 
+## Related work
+
+This repository doesn't propose a new motion-generation model or a new benchmark —
+the model exists to give the harness something to evaluate, as above. It's worth
+being explicit about how the harness differs from the dominant evaluation practice
+in this area, since the difference is deliberate, not an oversight.
+
+That practice, introduced with HumanML3D (Guo et al., CVPR 2022) and used by later
+text-to-motion models including MDM (Tevet et al., ICLR 2023), scores a single
+fixed-length generated clip against ground truth in a learned text-motion embedding
+space — FID, R-precision, diversity/multimodality — via an encoder pretrained on
+that dataset's text annotations. MDM also reports a foot-skating ratio, which this
+repository's `foot_skate` metric is adapted from, not an independent invention.
+
+Two differences follow from the problem this harness targets rather than from a
+claim that either approach is more correct. First, that protocol scores one
+fixed-length clip; it has no rollout-length axis, because the models it evaluates
+don't feed their own output back in as conditioning the way a long-horizon
+autoregressive generator does. The compounding self-conditioning error that
+free-vs-teacher-forced divergence isolates isn't something a fixed-length
+single-clip protocol is positioned to see. Second, raw AMASS (used here) has no
+text annotations, so there's no pretrained embedding space to score FID/R-precision
+against — this repository's metrics work directly on joint-position, velocity, and
+acceleration statistics instead, which is simpler and cannot capture semantic or
+perceptual quality the way a learned embedding-space metric can. That's a real
+limitation of this harness relative to that practice, not a hidden advantage.
+
+The zero-velocity baseline (Martinez et al., CVPR 2017) is drawn from the older
+motion-*prediction* literature rather than generation — the closer match, since
+this repository's task (condition on an observed past window, autoregressively
+predict the next one) is structurally a prediction problem, independent of the
+model itself being trained with generative flow-matching machinery.
+
 ## Method
 
 **Model** (`src/flowmotion/model/`): a rectified-flow / conditional flow-matching
