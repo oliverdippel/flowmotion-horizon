@@ -47,6 +47,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_train.add_argument("--d-model", type=int, default=256)
     p_train.add_argument("--n-layers", type=int, default=4)
     p_train.add_argument("--n-heads", type=int, default=4)
+    p_train.add_argument("--dim-ff", type=int, default=512)
     p_train.add_argument("--cache-size", type=int, default=64)
     p_train.add_argument(
         "--val-every",
@@ -144,6 +145,7 @@ def cmd_train(args: argparse.Namespace) -> None:
         d_model=args.d_model,
         n_layers=args.n_layers,
         n_heads=args.n_heads,
+        dim_ff=args.dim_ff,
         cache_size=args.cache_size,
         val_every=args.val_every,
         val_batches=args.val_batches,

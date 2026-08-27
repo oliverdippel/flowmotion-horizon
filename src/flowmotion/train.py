@@ -293,7 +293,11 @@ def train(cfg: TrainConfig) -> Path:
 
 
 def load_checkpoint(path: str | Path) -> dict:
-    ckpt = torch.load(path, weights_only=False)
+    """Always loads to CPU regardless of what device the checkpoint was trained on
+    (`map_location="cpu"`), so a checkpoint trained on a CUDA machine can be loaded on
+    a CPU-only one -- e.g. train on a free Colab/Kaggle GPU, then run eval/rollout/
+    visualize locally, which is the documented workflow for this repository."""
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
     model = VelocityTransformer(**ckpt["model_kwargs"])
     model.load_state_dict(ckpt["state_dict"])
     model.eval()

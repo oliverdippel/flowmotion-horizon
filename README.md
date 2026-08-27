@@ -157,6 +157,11 @@ identically.
 
 ## Scaling
 
+`train()` picks up CUDA automatically (no separate GPU flag) — see
+[COLAB.md](COLAB.md) for a walkthrough of training a larger model on a free
+Colab/Kaggle GPU, including the dependency-install and data-transfer gotchas that are
+specific to that environment.
+
 **Parallel evaluation.** `flowmotion eval --workers N` shards held-out sequences
 across `N` processes (`eval/parallel.py`), each reloading the checkpoint independently
 and running the same trial logic as the single-process path (`eval/harness.py`'s
