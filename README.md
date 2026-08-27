@@ -10,6 +10,10 @@ distributional drift, and free-vs-teacher-forced divergence as a function of rol
 length. The model exists to give the harness something to evaluate against; the
 harness, not the model, is the deliverable.
 
+**[Read the write-up](WRITEUP.md)** for the short version: what the harness found
+about its own headline metric, and why a trivial baseline changed how two other
+metrics here should be read.
+
 ## Problem
 
 Motion-generation models are usually evaluated on short rollouts, where autoregressive
@@ -256,6 +260,11 @@ uv run flowmotion eval --checkpoint ./runs/real_v2/model.pt --data-root /path/to
 
 ~42 minutes to train on CPU. Training loss: 2.24 → ~0.28. Eval ran in 22 minutes across
 8 worker processes (9,363 trials: 3 seed windows × 3 noise draws per trial, averaged).
+6.38M parameters. Single-CPU (M-series laptop, one core) inference throughput at 10
+Euler steps: ~600 frames/sec regardless of rollout length (50ms for a 30-frame
+rollout, 490ms for 300 frames) — the per-window cost is fixed and the rollout is just
+that cost repeated, since `K == H` lets a predicted window feed straight back in as
+the next past window with no extra work between windows.
 
 ![Horizon-stability metrics](assets/horizon_curves_example.png)
 
